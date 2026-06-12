@@ -1,0 +1,9 @@
+Flask
+pandas
+pypdf
+pypdfium2
+easyocr
+numpy
+Pillow
+openpyxl
+gunicorn

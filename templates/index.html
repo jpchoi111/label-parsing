@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Medit PDF Parser & Printer</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background-color: #f4f7f6; }
+        .container { max-width: 800px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { color: #333; text-align: center; }
+        .section { margin-bottom: 30px; padding: 20px; border: 1px solid #eee; border-radius: 8px; }
+        .btn { display: inline-block; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; margin-right: 10px; transition: background 0.3s; }
+        .btn-primary { background-color: #007bff; color: white; }
+        .btn-success { background-color: #28a745; color: white; }
+        .btn-secondary { background-color: #6c757d; color: white; }
+        .btn:hover { opacity: 0.9; }
+        input[type="file"] { margin-bottom: 20px; }
+        .file-list { margin-top: 15px; font-size: 14px; color: #666; }
+        #results-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        #results-table th, #results-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        #results-table th { background-color: #f8f9fa; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Medit PDF Automation</h1>
+        
+        <div class="section">
+            <h3>1. 송장 업로드(추가 가능)</h3>
+            
+            <!-- Standard Upload -->
+            <div style="margin-bottom: 20px;">
+                <button type="button" class="btn btn-primary" onclick="document.getElementById('add-auto-files').click()">+ 파일 업로드</button>
+                <input type="file" id="add-auto-files" multiple accept=".pdf" style="display:none" onchange="addAutoFiles(this)">
+            </div>
+
+            <!-- Manual Entry -->
+            <div style="background-color: #f8f9fa; border: 2px dashed #dee2e6; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <p style="margin-top:0; font-weight: bold; color: #495057;">Reference 직접 입력 추가:</p>
+                <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <input type="file" id="manual-file" accept=".pdf" style="flex: 1; min-width: 200px;">
+                    <input type="text" id="manual-ref" placeholder="Ref 번호 입력 (예: 4000001234)" style="padding: 8px; border: 1px solid #ced4da; border-radius: 4px; flex: 1; min-width: 200px;">
+                    <button type="button" class="btn btn-secondary" onclick="addManualFile()">수동 추가</button>
+                </div>
+                <small style="color: #6c757d; display: block; margin-top: 5px;">* PDF에서 Ref 번호를 찾지 못할 경우 사용하세요. (Waybill은 자동 추출 시도)</small>
+            </div>
+
+            <!-- Pending List -->
+            <div id="file-list-container" style="border: 1px solid #eee; border-radius: 8px; padding: 15px; max-height: 300px; overflow-y: auto;">
+                <p style="margin-top:0; border-bottom: 1px solid #eee; padding-bottom: 5px;"><strong>선택된 파일 목록:</strong></p>
+                <div id="pending-list" class="file-list">
+                    선택된 파일이 없습니다.
+                </div>
+            </div>
+
+            <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+                <button type="button" class="btn btn-success" onclick="processAll('parse')">송장 파싱</button>
+                <button type="button" class="btn btn-secondary" onclick="processAll('print-label')">라벨 사이즈 인쇄</button>
+                <button type="button" class="btn btn-secondary" onclick="processAll('print-a4')">A4 사이즈 인쇄</button>
+                <button type="button" class="btn" style="background:#dc3545; color:white;" onclick="clearList()">초기화</button>
+            </div>
+        </div>
+
+        <!-- Results Table Section -->
+        <div id="results-section" class="section" style="display: none;">
+            <h3>2. 분석 결과</h3>
+            <div style="margin-bottom: 15px;">
+                <button class="btn btn-success" onclick="downloadExcel()">엑셀 다운로드 (eshop 업로드용)</button>
+            </div>
+            <div style="overflow-x: auto;">
+                <table id="results-table">
+                    <thead>
+                        <tr>
+                            <th>Ref No (SAP Order)</th>
+                            <th>Tracking Number</th>
+                            <th>Size Type</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="status" style="margin-top: 20px; font-weight: bold; color: #007bff;"></div>
+
+        
+        <!-- Progress Bar Area -->
+        <div id="progress-container" style="display: none; margin-top: 15px;">
+            <div style="background-color: #e9ecef; border-radius: 10px; height: 20px; width: 100%; overflow: hidden;">
+                <div id="progress-bar" style="background-color: #28a745; height: 100%; width: 0%; transition: width 0.3s;"></div>
+            </div>
+            <div id="progress-text" style="font-size: 12px; text-align: center; margin-top: 5px; color: #666;">0 / 0 (0%)</div>
+        </div>
+    </div>
+
+    <script>
+        let allFiles = []; 
+        let currentAnalysisResults = [];
+        let progressInterval = null;
+
+        function addAutoFiles(input) {
+            for (let file of input.files) {
+                if (!allFiles.some(f => f.file.name === file.name && f.file.size === file.size)) {
+                    allFiles.push({ file: file, manualRef: null });
+                }
+            }
+            renderFileList();
+            input.value = '';
+        }
+
+        function addManualFile() {
+            const fileInput = document.getElementById('manual-file');
+            const refInput = document.getElementById('manual-ref');
+            if (!fileInput.files[0]) { alert('PDF 파일을 선택해주세요.'); return; }
+            if (!refInput.value.trim()) { alert('Reference 번호를 입력해주세요.'); return; }
+            const file = fileInput.files[0];
+            allFiles.push({ file: file, manualRef: refInput.value.trim() });
+            renderFileList();
+            fileInput.value = '';
+            refInput.value = '';
+        }
+
+        function renderFileList() {
+            const listDiv = document.getElementById('pending-list');
+            if (allFiles.length === 0) { listDiv.innerHTML = '선택된 파일이 없습니다.'; return; }
+            let html = '<ul style="list-style: none; padding: 0; margin: 0;">';
+            allFiles.forEach((item, index) => {
+                const refTag = item.manualRef 
+                    ? `<span style="background: #e9ecef; padding: 2px 6px; border-radius: 4px; font-size: 12px; color: #495057; margin-left: 8px;">수동: ${item.manualRef}</span>` 
+                    : `<span style="background: #e7f5ff; padding: 2px 6px; border-radius: 4px; font-size: 12px; color: #1971c2; margin-left: 8px;">자동 추출</span>`;
+                html += `<li style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f8f9fa;">
+                    <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;"><span style="font-weight: 500;">${item.file.name}</span>${refTag}</div>
+                    <button onclick="removeFile(${index})" style="background: none; border: none; color: #fa5252; cursor: pointer; font-size: 12px;">[삭제]</button>
+                </li>`;
+            });
+            html += '</ul>';
+            listDiv.innerHTML = html;
+        }
+
+        function removeFile(index) { allFiles.splice(index, 1); renderFileList(); }
+
+        function clearList() {
+            if (confirm('모든 목록을 초기화할까요?')) {
+                allFiles = []; currentAnalysisResults = [];
+                renderFileList(); document.getElementById('results-section').style.display = 'none';
+                document.getElementById('status').innerText = ''; resetProgress();
+            }
+        }
+
+        function resetProgress() {
+            document.getElementById('progress-container').style.display = 'none';
+            document.getElementById('progress-bar').style.width = '0%';
+            document.getElementById('progress-text').innerText = '0 / 0 (0%)';
+            if (progressInterval) clearInterval(progressInterval);
+        }
+
+        function displayResults(results) {
+            currentAnalysisResults = results;
+            const section = document.getElementById('results-section');
+            const tbody = document.getElementById('results-body');
+            section.style.display = 'block';
+            tbody.innerHTML = '';
+            results.forEach(row => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${row['Ref No']}</td><td>${row['Tracking Number']}</td><td>${row['Size Type']}</td>`;
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function downloadExcel() {
+            if (currentAnalysisResults.length === 0) return;
+            const response = await fetch('/download_excel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(currentAnalysisResults)
+            });
+            if (response.ok) {
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = "extraction_results.xlsx";
+                document.body.appendChild(a); a.click(); a.remove();
+            }
+        }
+
+        async function processAll(action) {
+            if (allFiles.length === 0) { alert('파일을 먼저 추가해주세요.'); return; }
+            const statusDiv = document.getElementById('status');
+            const progressContainer = document.getElementById('progress-container');
+            const progressBar = document.getElementById('progress-bar');
+            const progressText = document.getElementById('progress-text');
+            const jobId = 'job_' + Date.now();
+            const formData = new FormData();
+            const manualRefMap = {};
+
+            allFiles.forEach(item => {
+                formData.append('files', item.file);
+                if (item.manualRef) manualRefMap[item.file.name] = item.manualRef;
+            });
+            formData.append('manual_refs', JSON.stringify(manualRefMap));
+            formData.append('job_id', jobId);
+
+            let endpoint = action === 'parse' ? '/parse' : '/print_filter';
+            if (action === 'parse') {
+                statusDiv.innerText = '파싱 및 분석 중...';
+                progressContainer.style.display = 'block';
+                progressInterval = setInterval(async () => {
+                    const res = await fetch(`/progress/${jobId}`);
+                    const data = await res.json();
+                    if (data.total > 0) {
+                        const percent = Math.round((data.current / data.total) * 100);
+                        progressBar.style.width = percent + '%';
+                        progressText.innerText = `${data.current} / ${data.total} (${percent}%)`;
+                    }
+                }, 800);
+            } else {
+                const size = action === 'print-label' ? 'label' : 'a4';
+                formData.append('target_size', size);
+                statusDiv.innerText = size + ' 분류 및 통합 중...';
+                resetProgress();
+            }
+
+            try {
+                const response = await fetch(endpoint, { method: 'POST', body: formData });
+                if (response.ok) {
+                    if (action === 'parse') {
+                        const results = await response.json();
+                        displayResults(results);
+                        statusDiv.innerText = '분석 완료! 아래 표를 확인하세요.';
+                    } else {
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const iframe = document.createElement('iframe');
+                        iframe.style.display = 'none'; iframe.src = url;
+                        document.body.appendChild(iframe);
+                        iframe.onload = function() { iframe.contentWindow.focus(); iframe.contentWindow.print(); statusDiv.innerText = '인쇄창이 열렸습니다.'; };
+                    }
+                } else {
+                    const errorData = await response.json().catch(() => ({}));
+                    statusDiv.innerText = '오류: ' + (errorData.error || '처리 중 문제가 발생했습니다.');
+                }
+            } catch (e) { console.error(e); statusDiv.innerText = '오류가 발생했습니다.'; }
+            finally { if (action === 'parse') { progressBar.style.width = '100%'; setTimeout(resetProgress, 2000); } }
+        }
+    </script>
+
+</body>
+
+</html>

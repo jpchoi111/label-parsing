@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Output files
+extraction_results.xlsx
+*.log
+
+# Sensitive Data
+.env
+pdf/
+*.pdf
+
+# IDEs
+.vscode/
+.idea/
