@@ -5,101 +5,190 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Medit PDF Parser & Printer</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background-color: #f4f7f6; }
-        .container { max-width: 800px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1 { color: #333; text-align: center; }
-        .section { margin-bottom: 30px; padding: 20px; border: 1px solid #eee; border-radius: 8px; }
-        .btn { display: inline-block; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; margin-right: 10px; transition: background 0.3s; }
-        .btn-primary { background-color: #007bff; color: white; }
-        .btn-success { background-color: #28a745; color: white; }
-        .btn-secondary { background-color: #6c757d; color: white; }
-        .btn:hover { opacity: 0.9; }
-        input[type="file"] { margin-bottom: 20px; }
-        .file-list { margin-top: 15px; font-size: 14px; color: #666; }
-        #results-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        #results-table th, #results-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        #results-table th { background-color: #f8f9fa; }
+        :root {
+            --primary: #007bff;
+            --success: #28a745;
+            --secondary: #6c757d;
+            --warning: #fd7e14;
+            --danger: #dc3545;
+            --bg: #f8f9fa;
+            --card-bg: #ffffff;
+            --text: #333;
+            --border: #dee2e6;
+        }
+        body { font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif; margin: 0; background-color: var(--bg); color: var(--text); line-height: 1.6; }
+        .header { background: #fff; border-bottom: 1px solid var(--border); padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .header h1 { margin: 0; font-size: 1.5rem; color: var(--primary); font-weight: 700; }
+        
+        .main-container { display: flex; gap: 2rem; padding: 2rem; max-width: 1400px; margin: auto; align-items: flex-start; }
+        .left-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1.5rem; }
+        .right-panel { flex: 0 0 450px; position: sticky; top: 5rem; max-height: calc(100vh - 7rem); display: flex; flex-direction: column; }
+
+        .card { background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border); padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }
+        .card h3 { margin-top: 0; margin-bottom: 1.25rem; font-size: 1.1rem; display: flex; align-items: center; gap: 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.75rem; }
+        
+        .btn { display: inline-flex; align-items: center; justify-content: center; padding: 0.6rem 1.2rem; border: none; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 500; transition: all 0.2s; gap: 0.5rem; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-success { background: var(--success); color: white; }
+        .btn-secondary { background: var(--secondary); color: white; }
+        .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--secondary); }
+        .btn:hover { opacity: 0.9; transform: translateY(-1px); }
+        .btn:active { transform: translateY(0); }
+
+        .input-group { display: flex; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap; }
+        input[type="text"], input[type="number"], input[type="file"] { padding: 0.6rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; flex: 1; }
+        input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(0,123,255,0.1); }
+
+        .file-list-box { border: 1px solid var(--border); border-radius: 8px; max-height: 200px; overflow-y: auto; background: #fafafa; }
+        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+        .file-item:last-child { border-bottom: none; }
+        .file-info { display: flex; align-items: center; gap: 0.5rem; overflow: hidden; }
+        .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+        .badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; font-weight: bold; text-transform: uppercase; }
+        .badge-auto { background: #e7f5ff; color: #1971c2; }
+        .badge-manual { background: #f8f9fa; color: #495057; border: 1px solid #dee2e6; }
+
+        .results-card { display: flex; flex-direction: column; overflow: hidden; height: 100%; border-color: var(--primary); border-width: 2px; }
+        .table-wrapper { overflow: auto; flex: 1; margin-top: 1rem; border: 1px solid var(--border); border-radius: 8px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th { background: #f8f9fa; padding: 10px; text-align: left; border-bottom: 2px solid var(--border); position: sticky; top: 0; z-index: 10; }
+        td { padding: 10px; border-bottom: 1px solid var(--border); }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background-color: #fcfcfc; }
+
+        .progress-bar-container { height: 6px; background: #eee; border-radius: 10px; overflow: hidden; margin: 1rem 0; }
+        .progress-bar-fill { height: 100%; background: var(--success); width: 0%; transition: width 0.3s; }
+
+        .footer-info { font-size: 0.8rem; color: #888; margin-top: 0.5rem; }
+        
+        /* Specific accent colors */
+        .manual-data-card { border-left: 4px solid var(--warning); background-color: #fffaf5; }
+        .picking-card { border-left: 4px solid var(--success); }
+        .delivery-card { border-left: 4px solid var(--primary); }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Medit PDF Automation</h1>
-        
-        <div class="section">
-            <h3>1. 송장 업로드(추가 가능)</h3>
+    <header class="header">
+        <h1>Medit PDF Automation Dashboard</h1>
+        <div id="status-badge" style="font-size: 0.85rem; font-weight: 600;"></div>
+    </header>
+
+    <div class="main-container">
+        <!-- Left Column: Operations -->
+        <div class="left-panel">
+            <!-- 1. PDF Upload & Analysis -->
+            <div class="card">
+                <h3>📦 송장 업로드 및 분석</h3>
+                <div class="input-group">
+                    <button type="button" class="btn btn-primary" onclick="document.getElementById('add-auto-files').click()">+ 파일 선택</button>
+                    <input type="file" id="add-auto-files" multiple accept=".pdf" style="display:none" onchange="addAutoFiles(this)">
+                    <button type="button" class="btn btn-outline" onclick="clearList()">초기화</button>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                    <!-- Manual Ref with File -->
+                    <div style="background: #f8f9fa; padding: 1rem; border-radius: 8px; border: 1px dashed var(--border);">
+                        <p style="margin: 0 0 0.75rem 0; font-weight: 600; font-size: 0.9rem;">PDF 직접 업로드 (Ref 지정)</p>
+                        <input type="file" id="manual-file" accept=".pdf" style="width: 100%; margin-bottom: 0.5rem;">
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <input type="text" id="manual-ref" placeholder="Reference 번호">
+                            <button type="button" class="btn btn-secondary" onclick="addManualFile()" style="padding: 0.5rem 1rem;">추가</button>
+                        </div>
+                    </div>
+
+                    <!-- Direct Data (No File) -->
+                    <div style="background: #fff4e6; padding: 1rem; border-radius: 8px; border: 1px solid #ffd8a8;">
+                        <p style="margin: 0 0 0.75rem 0; font-weight: 600; font-size: 0.9rem; color: #d9480f;">데이터만 추가 (파일 없음)</p>
+                        <input type="text" id="direct-ref" placeholder="SAP Order" style="margin-bottom: 0.5rem; width: calc(100% - 1.2rem);">
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <input type="text" id="direct-track" placeholder="Tracking No">
+                            <button type="button" class="btn" style="background: #fd7e14; color: white; padding: 0.5rem 1rem;" onclick="addDirectData()">추가</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top: 1.5rem;">
+                    <p style="font-weight: 600; font-size: 0.9rem; margin-bottom: 0.5rem;">선택된 파일 목록 (<span id="file-count">0</span>)</p>
+                    <div class="file-list-box" id="pending-list">
+                        <div style="padding: 2rem; text-align: center; color: #aaa; font-size: 0.9rem;">파일을 추가해주세요</div>
+                    </div>
+                </div>
+
+                <div id="progress-container" style="display: none; margin-top: 1rem;">
+                    <div class="progress-bar-container"><div class="progress-bar-fill" id="progress-bar"></div></div>
+                    <div id="progress-text" style="font-size: 0.8rem; text-align: center; color: #666;">0 / 0 (0%)</div>
+                </div>
+
+                <div style="margin-top: 1.5rem; display: flex; gap: 0.75rem;">
+                    <button type="button" class="btn btn-success" style="flex: 2;" onclick="processAll('parse')">⚡ 송장 파싱 시작</button>
+                    <button type="button" class="btn btn-outline" style="flex: 1;" onclick="processAll('print-label')">🏷️ 라벨 인쇄</button>
+                    <button type="button" class="btn btn-outline" style="flex: 1;" onclick="processAll('print-a4')">📄 A4 인쇄</button>
+                </div>
+            </div>
+
+            <!-- 2. Picking List & Delivery Note -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+                <div class="card picking-card">
+                    <h3>📋 Picking List</h3>
+                    <input type="file" id="picking-list-file" accept=".pdf" style="width: calc(100% - 1.2rem); margin-bottom: 1rem;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                        <label for="start-page" style="font-size: 0.85rem; font-weight: 600; white-space: nowrap;">시작 페이지:</label>
+                        <input type="number" id="start-page" value="1" min="1" style="width: 100%;">
+                        <span style="font-size: 0.75rem; color: #888; white-space: nowrap;">(1부터 시작)</span>
+                    </div>
+                    <button type="button" class="btn btn-success" style="width: 100%;" onclick="processPickingList()">Picking List 분석</button>
+                </div>
+
+                <div class="card delivery-card">
+                    <h3>🚚 Delivery Note</h3>
+                    <input type="file" id="source-excel-file" accept=".xls,.xlsx" style="width: calc(100% - 1.2rem); margin-bottom: 1rem;">
+                    <div style="display: flex; gap: 1rem; margin-bottom: 1rem;">
+                        <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem;">
+                            <label for="pallet-count" style="font-size: 0.85rem; font-weight: 600; white-space: nowrap;">Pallet:</label>
+                            <input type="number" id="pallet-count" value="1" min="0" style="width: 100%;">
+                        </div>
+                        <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem;">
+                            <label for="box-count" style="font-size: 0.85rem; font-weight: 600; white-space: nowrap;">Box:</label>
+                            <input type="number" id="box-count" value="0" min="0" style="width: 100%;">
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-primary" style="width: 100%;" onclick="generateDeliveryNote()">Delivery Note 생성</button>
+                </div>
+            </div>
             
-            <!-- Standard Upload -->
-            <div style="margin-bottom: 20px;">
-                <button type="button" class="btn btn-primary" onclick="document.getElementById('add-auto-files').click()">+ 파일 업로드</button>
-                <input type="file" id="add-auto-files" multiple accept=".pdf" style="display:none" onchange="addAutoFiles(this)">
-            </div>
+            <div id="status" style="padding: 1rem; border-radius: 8px; font-weight: 500;"></div>
+        </div>
 
-            <!-- Manual Entry -->
-            <div style="background-color: #f8f9fa; border: 2px dashed #dee2e6; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-                <p style="margin-top:0; font-weight: bold; color: #495057;">Reference 직접 입력 추가:</p>
-                <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                    <input type="file" id="manual-file" accept=".pdf" style="flex: 1; min-width: 200px;">
-                    <input type="text" id="manual-ref" placeholder="Ref 번호 입력 (예: 4000001234)" style="padding: 8px; border: 1px solid #ced4da; border-radius: 4px; flex: 1; min-width: 200px;">
-                    <button type="button" class="btn btn-secondary" onclick="addManualFile()">수동 추가</button>
+        <!-- Right Column: Results Panel -->
+        <div class="right-panel">
+            <div class="card results-card" id="results-section" style="display: none;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h3 style="border:none; margin:0; padding:0;">🔍 분석 결과</h3>
+                    <button class="btn btn-success" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;" onclick="downloadExcel()">Excel 저장</button>
                 </div>
-                <small style="color: #6c757d; display: block; margin-top: 5px;">* PDF에서 Ref 번호를 찾지 못할 경우 사용하세요. (Waybill은 자동 추출 시도)</small>
-            </div>
-
-            <!-- Pending List -->
-            <div id="file-list-container" style="border: 1px solid #eee; border-radius: 8px; padding: 15px; max-height: 300px; overflow-y: auto;">
-                <p style="margin-top:0; border-bottom: 1px solid #eee; padding-bottom: 5px;"><strong>선택된 파일 목록:</strong></p>
-                <div id="pending-list" class="file-list">
-                    선택된 파일이 없습니다.
+                
+                <div class="table-wrapper">
+                    <table id="results-table">
+                        <thead>
+                            <tr>
+                                <th>Ref No</th>
+                                <th>Tracking No</th>
+                                <th>Size</th>
+                            </tr>
+                        </thead>
+                        <tbody id="results-body"></tbody>
+                    </table>
                 </div>
+                <div class="footer-info">* 수동 입력 항목은 'manual'로 표시됩니다.</div>
             </div>
-
-            <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
-                <button type="button" class="btn btn-success" onclick="processAll('parse')">송장 파싱</button>
-                <button type="button" class="btn btn-secondary" onclick="processAll('print-label')">라벨 사이즈 인쇄</button>
-                <button type="button" class="btn btn-secondary" onclick="processAll('print-a4')">A4 사이즈 인쇄</button>
-                <button type="button" class="btn" style="background:#dc3545; color:white;" onclick="clearList()">초기화</button>
-            </div>
-        </div>
-
-        <!-- Picking List Section -->
-        <div class="section">
-            <h3>2. Picking List 업로드</h3>
-            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                <input type="file" id="picking-list-file" accept=".pdf" style="flex: 1; min-width: 200px;">
-                <button type="button" class="btn btn-success" onclick="processPickingList()">Picking List 파싱</button>
-            </div>
-            <small style="color: #6c757d; display: block; margin-top: 5px;">* 전체 오더 내역(Packing No, SKU 등)을 엑셀로 추출합니다.</small>
-        </div>
-
-        <!-- Delivery Note Section -->
-        <div class="section">
-            <h3>3. Delivery Note 생성</h3>
-            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                <input type="file" id="source-excel-file" accept=".xls,.xlsx" style="flex: 1; min-width: 200px;">
-                <button type="button" class="btn btn-primary" onclick="generateDeliveryNote()">Delivery Note 생성</button>
-            </div>
-            <small style="color: #6c757d; display: block; margin-top: 5px;">* 원본 엑셀(20260612.xls)을 업로드하여 템플릿에 데이터를 채웁니다.</small>
-        </div>
-
-        <!-- Results Table Section -->
-        <div id="results-section" class="section" style="display: none;">
-            <h3>4. 송장 분석 결과</h3>
-            <div style="margin-bottom: 15px;">
-                <button class="btn btn-success" onclick="downloadExcel()">엑셀 다운로드 (eshop 업로드용)</button>
-            </div>
-            <div style="overflow-x: auto;">
-                <table id="results-table">
-                    <thead>
-                        <tr>
-                            <th>Ref No (SAP Order)</th>
-                            <th>Tracking Number</th>
-                            <th>Size Type</th>
-                        </tr>
-                    </thead>
-                    <tbody id="results-body"></tbody>
-                </table>
+            
+            <!-- Welcome/Instruction Card when no results -->
+            <div class="card" id="welcome-card" style="text-align: center; color: #888; padding: 4rem 2rem;">
+                <div style="font-size: 3rem; margin-bottom: 1rem;">📊</div>
+                <p>송장을 파싱하거나 데이터를 추가하면<br>여기에 분석 결과가 나타납니다.</p>
             </div>
         </div>
+    </div>
 
         <div id="status" style="margin-top: 20px; font-weight: bold; color: #007bff;"></div>
 
@@ -142,15 +231,25 @@
 
         function renderFileList() {
             const listDiv = document.getElementById('pending-list');
-            if (allFiles.length === 0) { listDiv.innerHTML = '선택된 파일이 없습니다.'; return; }
+            const fileCountSpan = document.getElementById('file-count');
+            fileCountSpan.innerText = allFiles.length;
+            
+            if (allFiles.length === 0) { 
+                listDiv.innerHTML = '<div style="padding: 2rem; text-align: center; color: #aaa; font-size: 0.9rem;">파일을 추가해주세요</div>'; 
+                return; 
+            }
+            
             let html = '<ul style="list-style: none; padding: 0; margin: 0;">';
             allFiles.forEach((item, index) => {
-                const refTag = item.manualRef 
-                    ? `<span style="background: #e9ecef; padding: 2px 6px; border-radius: 4px; font-size: 12px; color: #495057; margin-left: 8px;">수동: ${item.manualRef}</span>` 
-                    : `<span style="background: #e7f5ff; padding: 2px 6px; border-radius: 4px; font-size: 12px; color: #1971c2; margin-left: 8px;">자동 추출</span>`;
-                html += `<li style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f8f9fa;">
-                    <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;"><span style="font-weight: 500;">${item.file.name}</span>${refTag}</div>
-                    <button onclick="removeFile(${index})" style="background: none; border: none; color: #fa5252; cursor: pointer; font-size: 12px;">[삭제]</button>
+                const badge = item.manualRef 
+                    ? `<span class="badge badge-manual">수동: ${item.manualRef}</span>` 
+                    : `<span class="badge badge-auto">자동 추출</span>`;
+                html += `<li class="file-item">
+                    <div class="file-info">
+                        <span class="file-name">${item.file.name}</span>
+                        ${badge}
+                    </div>
+                    <button onclick="removeFile(${index})" style="background: none; border: none; color: var(--danger); cursor: pointer; font-size: 0.8rem;">삭제</button>
                 </li>`;
             });
             html += '</ul>';
@@ -161,9 +260,13 @@
 
         function clearList() {
             if (confirm('모든 목록을 초기화할까요?')) {
-                allFiles = []; currentAnalysisResults = [];
-                renderFileList(); document.getElementById('results-section').style.display = 'none';
-                document.getElementById('status').innerText = ''; resetProgress();
+                allFiles = []; 
+                currentAnalysisResults = [];
+                renderFileList(); 
+                document.getElementById('results-section').style.display = 'none';
+                document.getElementById('welcome-card').style.display = 'block';
+                document.getElementById('status').innerText = ''; 
+                resetProgress();
             }
         }
 
@@ -174,17 +277,56 @@
             if (progressInterval) clearInterval(progressInterval);
         }
 
-        function displayResults(results) {
-            currentAnalysisResults = results;
-            const section = document.getElementById('results-section');
+        function addDirectData() {
+            const refInput = document.getElementById('direct-ref');
+            const trackInput = document.getElementById('direct-track');
+            
+            const ref = refInput.value.trim();
+            const track = trackInput.value.trim();
+            
+            if (!ref) { alert('Ref 번호를 입력해주세요.'); return; }
+            
+            const newEntry = {
+                "Ref No": ref,
+                "Tracking Number": track || "Not Found",
+                "Size Type": "manual"
+            };
+            
+            // Hide welcome card and show results
+            document.getElementById('welcome-card').style.display = 'none';
+            document.getElementById('results-section').style.display = 'flex';
+            
+            // Add to the current results list
+            currentAnalysisResults.push(newEntry);
+            
+            // Refresh the table
+            renderResultsTable();
+            
+            // Clear inputs
+            refInput.value = '';
+            trackInput.value = '';
+        }
+
+        function renderResultsTable() {
             const tbody = document.getElementById('results-body');
-            section.style.display = 'block';
             tbody.innerHTML = '';
-            results.forEach(row => {
+            currentAnalysisResults.forEach(row => {
                 const tr = document.createElement('tr');
                 tr.innerHTML = `<td>${row['Ref No']}</td><td>${row['Tracking Number']}</td><td>${row['Size Type']}</td>`;
                 tbody.appendChild(tr);
             });
+        }
+
+        function displayResults(results) {
+            // Merge results
+            currentAnalysisResults = currentAnalysisResults.concat(results);
+            
+            // Hide welcome card and show results
+            document.getElementById('welcome-card').style.display = 'none';
+            const section = document.getElementById('results-section');
+            section.style.display = 'flex';
+            
+            renderResultsTable();
         }
 
         async function downloadExcel() {
@@ -205,6 +347,8 @@
 
         async function generateDeliveryNote() {
             const fileInput = document.getElementById('source-excel-file');
+            const palletInput = document.getElementById('pallet-count');
+            const boxInput = document.getElementById('box-count');
             if (!fileInput.files[0]) { alert('원본 엑셀 파일(20260612.xls)을 선택해주세요.'); return; }
             
             const statusDiv = document.getElementById('status');
@@ -212,6 +356,8 @@
             
             const formData = new FormData();
             formData.append('source_file', fileInput.files[0]);
+            formData.append('pallet_count', palletInput.value);
+            formData.append('box_count', boxInput.value);
             
             try {
                 const response = await fetch('/generate_delivery_note', {
@@ -220,6 +366,14 @@
                 });
                 
                 if (response.ok) {
+                    const labelingCount = parseInt(response.headers.get('X-Special-Match-Count') || '0');
+                    const totalCartons = parseInt(response.headers.get('X-Total-Cartons') || '0');
+                    const palletCount = parseInt(response.headers.get('X-Pallet-Count') || '0');
+                    const boxCount = parseInt(response.headers.get('X-Box-Count') || '0');
+                    
+                    const totalStk = labelingCount + totalCartons + boxCount;
+                    const totalPrice = (totalStk * 0.8).toFixed(1);
+
                     const blob = await response.blob();
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
@@ -228,7 +382,31 @@
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
-                    statusDiv.innerText = 'Delivery Note 생성 및 다운로드 완료!';
+                    
+                    statusDiv.innerHTML = `Delivery Note 생성 및 다운로드 완료!<br>
+                        <div style="margin-top: 15px; padding: 1.5rem; border: 2px solid var(--primary); border-radius: 12px; background: #fff; box-shadow: 0 4px 12px rgba(0,123,255,0.1);">
+                            <h3 style="margin-top: 0; color: var(--primary); border-bottom: 1px solid #eee; padding-bottom: 0.75rem; margin-bottom: 1rem; text-align: center;">🏁 최종 결과 요약</h3>
+                            <table style="width: 100%; border-collapse: collapse; text-align: center; border: 1px solid var(--border);">
+                                <thead style="background: #f8f9fa;">
+                                    <tr>
+                                        <th style="padding: 10px; border: 1px solid var(--border); font-size: 0.85rem; color: #888;">라벨링</th>
+                                        <th style="padding: 10px; border: 1px solid var(--border); font-size: 0.85rem; color: #888;">Carton 합계</th>
+                                        <th style="padding: 10px; border: 1px solid var(--border); font-size: 0.85rem; color: #888;">Box 갯수</th>
+                                        <th style="padding: 10px; border: 1px solid var(--border); font-size: 0.95rem; color: var(--primary); background: #e7f5ff; font-weight: 800;">총 갯수</th>
+                                        <th style="padding: 10px; border: 1px solid var(--border); font-size: 0.95rem; color: var(--warning); background: #fff4e6; font-weight: 800;">최종 가격</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td style="padding: 12px; border: 1px solid var(--border); color: #e64980;">${labelingCount} stk</td>
+                                        <td style="padding: 12px; border: 1px solid var(--border); color: #228be6;">${totalCartons} stk</td>
+                                        <td style="padding: 12px; border: 1px solid var(--border); color: #495057;">${boxCount} stk</td>
+                                        <td style="padding: 12px; border: 1px solid var(--border); font-weight: 900; color: var(--primary); background: #f0f8ff; font-size: 1.2rem;">${totalStk} stk</td>
+                                        <td style="padding: 12px; border: 1px solid var(--border); font-weight: 900; color: var(--warning); background: #fffbf5; font-size: 1.4rem;">${totalPrice}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>`;
                 } else {
                     const errorData = await response.json();
                     statusDiv.innerText = '오류: ' + (errorData.error || '처리 중 문제가 발생했습니다.');
@@ -241,6 +419,7 @@
 
         async function processPickingList() {
             const fileInput = document.getElementById('picking-list-file');
+            const startPageInput = document.getElementById('start-page');
             if (!fileInput.files[0]) { alert('Picking List PDF 파일을 선택해주세요.'); return; }
             
             const statusDiv = document.getElementById('status');
@@ -248,6 +427,7 @@
             
             const formData = new FormData();
             formData.append('picking_list', fileInput.files[0]);
+            formData.append('start_page', startPageInput.value);
             // Pass the tracking data from the previous analysis
             formData.append('tracking_data', JSON.stringify(currentAnalysisResults));
             
@@ -306,7 +486,7 @@
                         progressBar.style.width = percent + '%';
                         progressText.innerText = `${data.current} / ${data.total} (${percent}%)`;
                     }
-                }, 800);
+                }, 2000);
             } else {
                 const size = action === 'print-label' ? 'label' : 'a4';
                 formData.append('target_size', size);
