@@ -48,20 +48,35 @@
         .badge-auto { background: #e7f5ff; color: #1971c2; }
         .badge-manual { background: #f8f9fa; color: #495057; border: 1px solid #dee2e6; }
 
-        .results-card { display: flex; flex-direction: column; overflow: hidden; height: 100%; border-color: var(--primary); border-width: 2px; }
+        .results-card { display: flex; flex-direction: column; overflow: hidden; border-color: var(--primary); border-width: 2px; }
         .table-wrapper { overflow: auto; flex: 1; margin-top: 1rem; border: 1px solid var(--border); border-radius: 8px; }
         table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
         th { background: #f8f9fa; padding: 10px; text-align: left; border-bottom: 2px solid var(--border); position: sticky; top: 0; z-index: 10; }
-        td { padding: 10px; border-bottom: 1px solid var(--border); }
+        td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
         tr:last-child td { border-bottom: none; }
         tr:hover td { background-color: #fcfcfc; }
 
+        /* 삭제 버튼 */
+        .btn-row-del { background: none; border: none; cursor: pointer; color: var(--danger); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; line-height: 1; }
+        .btn-row-del:hover { background: #fff0f0; }
+
+        /* 복구 버튼 */
+        .btn-row-restore { background: none; border: 1px solid #007bff55; cursor: pointer; color: var(--primary); padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; line-height: 1.4; }
+        .btn-row-restore:hover { background: #e7f5ff; }
+
+        /* 삭제된 항목 섹션 */
+        .deleted-section { margin-top: 1rem; border-top: 1px dashed #ffb3b3; padding-top: 0.75rem; }
+        .deleted-section-label { font-size: 0.78rem; font-weight: 600; color: var(--danger); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.4rem; }
+        .deleted-table-wrapper { border: 1px solid #ffb3b3; border-radius: 8px; overflow: hidden; background: #fff8f8; }
+        .deleted-table-wrapper table td { color: #999; text-decoration: line-through; }
+        .deleted-table-wrapper table td.restore-cell { text-decoration: none; }
+        .deleted-count-badge { font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; background: #ffe0e0; color: var(--danger); font-weight: 700; }
+        .active-count-badge { font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; background: #d3f9d8; color: #2f9e44; font-weight: 700; }
+
         .progress-bar-container { height: 6px; background: #eee; border-radius: 10px; overflow: hidden; margin: 1rem 0; }
         .progress-bar-fill { height: 100%; background: var(--success); width: 0%; transition: width 0.3s; }
-
         .footer-info { font-size: 0.8rem; color: #888; margin-top: 0.5rem; }
         
-        /* Specific accent colors */
         .manual-data-card { border-left: 4px solid var(--warning); background-color: #fffaf5; }
         .picking-card { border-left: 4px solid var(--success); }
         .delivery-card { border-left: 4px solid var(--primary); }
@@ -74,7 +89,6 @@
     </header>
 
     <div class="main-container">
-        <!-- Left Column: Operations -->
         <div class="left-panel">
             <!-- 1. PDF Upload & Analysis -->
             <div class="card">
@@ -86,7 +100,6 @@
                 </div>
 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-                    <!-- Manual Ref with File -->
                     <div style="background: #f8f9fa; padding: 1rem; border-radius: 8px; border: 1px dashed var(--border);">
                         <p style="margin: 0 0 0.75rem 0; font-weight: 600; font-size: 0.9rem;">PDF 직접 업로드 (Ref 지정)</p>
                         <input type="file" id="manual-file" accept=".pdf" style="width: 100%; margin-bottom: 0.5rem;">
@@ -96,7 +109,6 @@
                         </div>
                     </div>
 
-                    <!-- Direct Data (No File) -->
                     <div style="background: #fff4e6; padding: 1rem; border-radius: 8px; border: 1px solid #ffd8a8;">
                         <p style="margin: 0 0 0.75rem 0; font-weight: 600; font-size: 0.9rem; color: #d9480f;">데이터만 추가 (파일 없음)</p>
                         <input type="text" id="direct-ref" placeholder="SAP Order" style="margin-bottom: 0.5rem; width: calc(100% - 1.2rem);">
@@ -167,22 +179,50 @@
                     <button class="btn btn-success" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;" onclick="downloadExcel()">Excel 저장</button>
                 </div>
                 
-                <div class="table-wrapper">
-                    <table id="results-table">
-                        <thead>
-                            <tr>
-                                <th>Ref No</th>
-                                <th>Tracking No</th>
-                                <th>Size</th>
-                            </tr>
-                        </thead>
-                        <tbody id="results-body"></tbody>
-                    </table>
+                <!-- 활성 결과 테이블 -->
+                <div style="margin-top: 0.75rem;">
+                    <div style="font-size: 0.78rem; font-weight: 600; color: #2f9e44; margin-bottom: 0.4rem; display: flex; align-items: center; gap: 0.4rem;">
+                        활성 항목 <span id="active-count-badge" class="active-count-badge">0개</span>
+                    </div>
+                    <div class="table-wrapper" style="margin-top: 0; max-height: 280px;">
+                        <table id="results-table">
+                            <thead>
+                                <tr>
+                                    <th>Ref No</th>
+                                    <th>Tracking No</th>
+                                    <th>Size</th>
+                                    <th style="width: 36px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="results-body"></tbody>
+                        </table>
+                    </div>
                 </div>
+
+                <!-- 삭제된 항목 섹션 -->
+                <div class="deleted-section" id="deleted-section" style="display: none;">
+                    <div class="deleted-section-label">
+                        🗑 삭제된 항목 <span id="deleted-count-badge" class="deleted-count-badge">0개</span>
+                        <span style="font-size: 0.7rem; color: #999; font-weight: 400;">· 엑셀·피킹리스트 제외</span>
+                    </div>
+                    <div class="deleted-table-wrapper">
+                        <table id="deleted-table">
+                            <thead>
+                                <tr>
+                                    <th>Ref No</th>
+                                    <th>Tracking No</th>
+                                    <th>Size</th>
+                                    <th style="width: 52px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="deleted-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <div class="footer-info">* 수동 입력 항목은 'manual'로 표시됩니다.</div>
             </div>
             
-            <!-- Welcome/Instruction Card when no results -->
             <div class="card" id="welcome-card" style="text-align: center; color: #888; padding: 4rem 2rem;">
                 <div style="font-size: 3rem; margin-bottom: 1rem;">📊</div>
                 <p>송장을 파싱하거나 데이터를 추가하면<br>여기에 분석 결과가 나타납니다.</p>
@@ -190,21 +230,10 @@
         </div>
     </div>
 
-        <div id="status" style="margin-top: 20px; font-weight: bold; color: #007bff;"></div>
-
-        
-        <!-- Progress Bar Area -->
-        <div id="progress-container" style="display: none; margin-top: 15px;">
-            <div style="background-color: #e9ecef; border-radius: 10px; height: 20px; width: 100%; overflow: hidden;">
-                <div id="progress-bar" style="background-color: #28a745; height: 100%; width: 0%; transition: width 0.3s;"></div>
-            </div>
-            <div id="progress-text" style="font-size: 12px; text-align: center; margin-top: 5px; color: #666;">0 / 0 (0%)</div>
-        </div>
-    </div>
-
     <script>
         let allFiles = []; 
-        let currentAnalysisResults = [];
+        let currentAnalysisResults = [];  // 활성 항목
+        let deletedResults = [];          // 삭제된 항목
         let progressInterval = null;
 
         function addAutoFiles(input) {
@@ -262,6 +291,7 @@
             if (confirm('모든 목록을 초기화할까요?')) {
                 allFiles = []; 
                 currentAnalysisResults = [];
+                deletedResults = [];
                 renderFileList(); 
                 document.getElementById('results-section').style.display = 'none';
                 document.getElementById('welcome-card').style.display = 'block';
@@ -277,13 +307,67 @@
             if (progressInterval) clearInterval(progressInterval);
         }
 
+        // 결과 행 삭제
+        function deleteResultRow(index) {
+            const removed = currentAnalysisResults.splice(index, 1)[0];
+            deletedResults.push(removed);
+            renderResultsTable();
+        }
+
+        // 삭제된 항목 복구
+        function restoreDeletedRow(index) {
+            const restored = deletedResults.splice(index, 1)[0];
+            currentAnalysisResults.push(restored);
+            renderResultsTable();
+        }
+
+        function renderResultsTable() {
+            // 활성 항목 렌더
+            const tbody = document.getElementById('results-body');
+            tbody.innerHTML = '';
+            currentAnalysisResults.forEach((row, i) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${row['Ref No']}</td>
+                    <td>${row['Tracking Number']}</td>
+                    <td>${row['Size Type']}</td>
+                    <td><button class="btn-row-del" onclick="deleteResultRow(${i})" title="삭제">🗑</button></td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // 활성 개수 배지
+            document.getElementById('active-count-badge').innerText = currentAnalysisResults.length + '개';
+
+            // 삭제된 항목 렌더
+            const deletedBody = document.getElementById('deleted-body');
+            deletedBody.innerHTML = '';
+            deletedResults.forEach((row, i) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${row['Ref No']}</td>
+                    <td>${row['Tracking Number']}</td>
+                    <td>${row['Size Type']}</td>
+                    <td class="restore-cell"><button class="btn-row-restore" onclick="restoreDeletedRow(${i})">↩ 복구</button></td>
+                `;
+                deletedBody.appendChild(tr);
+            });
+
+            // 삭제 섹션 표시/숨김
+            const deletedSection = document.getElementById('deleted-section');
+            if (deletedResults.length > 0) {
+                deletedSection.style.display = 'block';
+                document.getElementById('deleted-count-badge').innerText = deletedResults.length + '개';
+            } else {
+                deletedSection.style.display = 'none';
+            }
+        }
+
         function addDirectData() {
             const refInput = document.getElementById('direct-ref');
             const trackInput = document.getElementById('direct-track');
-            
             const ref = refInput.value.trim();
             const track = trackInput.value.trim();
-            
             if (!ref) { alert('Ref 번호를 입력해주세요.'); return; }
             
             const newEntry = {
@@ -292,40 +376,22 @@
                 "Size Type": "manual"
             };
             
-            // Hide welcome card and show results
             document.getElementById('welcome-card').style.display = 'none';
             document.getElementById('results-section').style.display = 'flex';
+            document.getElementById('results-section').style.flexDirection = 'column';
             
-            // Add to the current results list
             currentAnalysisResults.push(newEntry);
-            
-            // Refresh the table
             renderResultsTable();
-            
-            // Clear inputs
             refInput.value = '';
             trackInput.value = '';
         }
 
-        function renderResultsTable() {
-            const tbody = document.getElementById('results-body');
-            tbody.innerHTML = '';
-            currentAnalysisResults.forEach(row => {
-                const tr = document.createElement('tr');
-                tr.innerHTML = `<td>${row['Ref No']}</td><td>${row['Tracking Number']}</td><td>${row['Size Type']}</td>`;
-                tbody.appendChild(tr);
-            });
-        }
-
         function displayResults(results) {
-            // Merge results
             currentAnalysisResults = currentAnalysisResults.concat(results);
-            
-            // Hide welcome card and show results
             document.getElementById('welcome-card').style.display = 'none';
             const section = document.getElementById('results-section');
             section.style.display = 'flex';
-            
+            section.style.flexDirection = 'column';
             renderResultsTable();
         }
 
@@ -334,7 +400,7 @@
             const response = await fetch('/download_excel', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(currentAnalysisResults)
+                body: JSON.stringify(currentAnalysisResults)  // 활성 항목만
             });
             if (response.ok) {
                 const blob = await response.blob();
@@ -428,8 +494,7 @@
             const formData = new FormData();
             formData.append('picking_list', fileInput.files[0]);
             formData.append('start_page', startPageInput.value);
-            // Pass the tracking data from the previous analysis
-            formData.append('tracking_data', JSON.stringify(currentAnalysisResults));
+            formData.append('tracking_data', JSON.stringify(currentAnalysisResults));  // 활성 항목만
             
             try {
                 const response = await fetch('/parse_picking_list', {
@@ -517,7 +582,5 @@
             finally { if (action === 'parse') { progressBar.style.width = '100%'; setTimeout(resetProgress, 2000); } }
         }
     </script>
-
 </body>
-
 </html>

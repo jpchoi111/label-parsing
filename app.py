@@ -105,28 +105,44 @@ def extract_single_pdf(file_content, filename, manual_ref=None):
         if not full_text.strip():
             full_text = first_page.extract_text(orientations=(90,)) or ""
 
+
         def find_data(text):
             normalized = " ".join(text.split())
-            
-            # Ref No
+
+            # --- Ref No 파싱 ---
             ref_res = "Not Found"
             if manual_ref:
                 ref_res = manual_ref
             else:
-                ref_match = re.search(r'(?:Ref|Order|P/O|Shipment|Reference)[:\s]*([40RMA\d\s\-\;\,]{7,})', normalized, re.IGNORECASE)
-                if ref_match:
-                    ref_res = ref_match.group(1).strip()
-                    ref_res = re.split(r'\s{2,}', ref_res)[0]
+                # 1순위: 원본 텍스트에서 "Ref No:" 줄 파싱 (suffix -XXXX 포함 전체)
+                ref_line = re.search(r'Ref\s*No[:\s]+([\d][0-9;\-,\s]{5,80})', text, re.IGNORECASE)
+                if ref_line:
+                    candidate = ref_line.group(1).strip()
+                    # 숫자/구분자 이외 문자가 나오면 거기서 자름
+                    candidate = re.split(r'[^\d;\-,\s]', candidate)[0].strip()
+                    if len(re.sub(r'\D', '', candidate)) >= 7:
+                        ref_res = candidate
+
+                # 2순위: normalized에서 400xxxxxxx 형태 SAP 번호 직접 수집
                 if ref_res == "Not Found" or len(re.sub(r'\D', '', ref_res)) < 7:
                     all_sap = re.findall(r'\b(400\d{7})\b', normalized)
                     if all_sap:
                         ref_res = "; ".join(sorted(list(set(all_sap))))
 
-            # Tracking
+                # 3순위: 기타 Order/Reference 패턴 (fallback)
+                if ref_res == "Not Found":
+                    ref_match = re.search(
+                        r'(?:Order|P/O|Shipment|Reference)[:\s]*([40RMA\d\s\-\;\,]{7,})',
+                        normalized, re.IGNORECASE
+                    )
+                    if ref_match:
+                        ref_res = re.split(r'\s{2,}', ref_match.group(1).strip())[0]
+
+            # --- Tracking 파싱 (기존 유지) ---
             track_res = "Not Found"
             waybill_patterns = [
                 r'WAYBILL\s*[:\s]*([\d\s]{10,25})',
-                r'\b([71]\d[\d\s]{8,15}\d)\b', 
+                r'\b([71]\d[\d\s]{8,15}\d)\b',
                 r'\b([71]\d{9})\b',
                 r'\b(18\d{8})\b'
             ]
@@ -386,6 +402,12 @@ def generate_delivery_note():
                     dst_c = ws.cell(row=curr, column=c_idx)
                     if src_c.data_type == 'f': dst_c.value = src_c.value.replace('14', str(curr))
                     copy_style(src_c, dst_c)
+        # Determine last valid data row and footer row
+        last_d = 14 + num_new_rows
+        for r in range(ws.max_row, 14, -1):
+            if any(ws.cell(row=r, column=c).value for c in range(1, 6)): last_d = r; break
+        foot_r = last_d + 2
+
         # Find the exact signature rows after insertion by scanning for "DATEN :"
         sig_start_row = None
         sig_end_row = None
@@ -396,32 +418,137 @@ def generate_delivery_note():
             if val == "Unterschrift :":
                 sig_end_row = r
                 break
-        
-        if sig_start_row and sig_end_row:
-            # An A4 page typically fits about 38-42 rows under these styles and margins.
-            # If the signature block crosses a multiple of 40 rows, or if it starts past row 38,
-            # it should be pushed entirely to the next page to stay unified.
-            # Let's say if it starts after row 37, it's safer to break right before it.
-            if sig_start_row > 37:
-                from openpyxl.worksheet.pagebreak import Break
-                ws.row_breaks.append(Break(id=sig_start_row - 1))
 
-        logo_p, foot_p = 'image1.png', 'image2.png'
+        if sig_start_row and sig_end_row:
+            # Calculate A4 printable height dynamically based on margins (A4 height is 841.68 points)
+            top_margin = ws.page_margins.top if ws.page_margins.top is not None else 0.75
+            bottom_margin = ws.page_margins.bottom if ws.page_margins.bottom is not None else 1.0
+            a4_page_height = 841.68 - (top_margin * 72.0) - (bottom_margin * 72.0) - 5.0
+            default_h = ws.sheet_format.defaultRowHeight or 12.75
+
+            # Map each row (up to foot_r) to its calculated page number
+            page_map = {}
+            current_page = 1
+            current_height = 0.0
+            for r in range(1, foot_r + 1):
+                h = ws.row_dimensions[r].height or default_h
+                if current_height + h > a4_page_height:
+                    current_page += 1
+                    current_height = h
+                else:
+                    current_height += h
+                page_map[r] = current_page
+
+            # If signature block spans pages, insert a manual break before it
+            manual_break_row = None
+            if page_map.get(sig_start_row, 1) != page_map.get(foot_r, 1):
+                manual_break_row = sig_start_row - 1
+
+            # Re-simulate with manual break
+            actual_page_map = {}
+            current_page = 1
+            current_height = 0.0
+            for r in range(1, foot_r + 1):
+                h = ws.row_dimensions[r].height or default_h
+                if manual_break_row and r == manual_break_row + 1:
+                    current_page += 1
+                    current_height = h
+                elif current_height + h > a4_page_height:
+                    current_page += 1
+                    current_height = h
+                else:
+                    current_height += h
+                actual_page_map[r] = current_page
+
+            # Insert manual page breaks at page transitions
+            break_points = [r for r in range(2, foot_r + 1)
+                            if actual_page_map.get(r) != actual_page_map.get(r - 1)]
+            from openpyxl.worksheet.pagebreak import Break
+            for bp in reversed(break_points):
+                ws.row_breaks.append(Break(id=bp - 1))
+
+        # Set footer: &G inserts the VML-linked image in the center of the page footer
+        ws.oddFooter.center.text = "&G"
+
+        # Logo image (header area, sheet drawing)
+        logo_p = 'image1.png'
         try: from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker, XDRPositiveSize2D
         except: from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker; from openpyxl.drawing.xdr import XDRPositiveSize2D
         from openpyxl.utils.units import pixels_to_EMU
         if os.path.exists(logo_p):
-            img = XLImage(logo_p); img.anchor = OneCellAnchor(_from=AnchorMarker(col=0, colOff=pixels_to_EMU(60), row=3, rowOff=100), ext=XDRPositiveSize2D(cx=pixels_to_EMU(310), cy=pixels_to_EMU(160)))
+            img = XLImage(logo_p)
+            img.anchor = OneCellAnchor(_from=AnchorMarker(col=0, colOff=pixels_to_EMU(60), row=3, rowOff=100), ext=XDRPositiveSize2D(cx=pixels_to_EMU(310), cy=pixels_to_EMU(160)))
             ws.add_image(img)
-        last_d = 14 + num_new_rows
-        for r in range(ws.max_row, 14, -1):
-            if any(ws.cell(row=r, column=c).value for c in range(1, 6)): last_d = r; break
-        foot_r = last_d + 2
-        if os.path.exists(foot_p):
-            img = XLImage(foot_p); img.anchor = OneCellAnchor(_from=AnchorMarker(col=0, colOff=pixels_to_EMU(20), row=foot_r-1, rowOff=0), ext=XDRPositiveSize2D(cx=pixels_to_EMU(770), cy=pixels_to_EMU(77)))
-            ws.add_image(img)
+
         ws.page_setup.paperSize, ws.page_setup.orientation, ws.print_area = 9, 'portrait', f'A1:E{foot_r + 5}'
-        output = BytesIO(); wb.save(output); output.seek(0)
+        # Save workbook to buffer first
+        output = BytesIO()
+        wb.save(output)
+
+        # Inject VML footer image into the saved xlsx (zip) directly from the template.
+        # openpyxl does not support header/footer images natively, so we patch the zip.
+        foot_p = 'image2.png'
+        if os.path.exists(foot_p) and os.path.exists(template_path):
+            # Read required VML content from template
+            with zipfile.ZipFile(template_path, 'r') as tmpl_z:
+                vml_content = tmpl_z.read('xl/drawings/vmlDrawing1.vml')
+                vml_rels_content = tmpl_z.read('xl/drawings/_rels/vmlDrawing1.vml.rels')
+                footer_img_content = tmpl_z.read('xl/media/image2.png')
+
+            # Re-write the xlsx zip with VML entries added / patched
+            VML_CT = '<Default Extension="vml" ContentType="application/vnd.openxmlformats-officedocument.vmlDrawing"/>'
+            VML_REL_ENTRY = (
+                '<Relationship Id="rIdVML" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" '
+                'Target="../drawings/vmlDrawing1.vml"/>'
+            )
+            output.seek(0)
+            original_bytes = output.read()
+            patched = BytesIO()
+            with zipfile.ZipFile(BytesIO(original_bytes), 'r') as src_z, \
+                 zipfile.ZipFile(patched, 'w', compression=zipfile.ZIP_DEFLATED) as dst_z:
+                existing = {i.filename for i in src_z.infolist()}
+                for item in src_z.infolist():
+                    data = src_z.read(item.filename)
+                    if item.filename == '[Content_Types].xml':
+                        # Add VML content type if missing
+                        txt = data.decode('utf-8', errors='replace')
+                        if 'vmlDrawing' not in txt:
+                            txt = txt.replace('</Types>', VML_CT + '</Types>')
+                        data = txt.encode('utf-8')
+                    elif item.filename == 'xl/worksheets/_rels/sheet1.xml.rels':
+                        # Add legacyDrawingHF (VML) relationship
+                        txt = data.decode('utf-8', errors='replace')
+                        if 'vmlDrawing' not in txt:
+                            txt = txt.replace('</Relationships>', VML_REL_ENTRY + '</Relationships>')
+                        data = txt.encode('utf-8')
+                    elif item.filename == 'xl/worksheets/sheet1.xml':
+                        # Add <legacyDrawingHF> before </worksheet>.
+                        # openpyxl's root <worksheet> element does NOT declare xmlns:r globally;
+                        # r: only appears inline on the <drawing> tag. To avoid "undeclared prefix"
+                        # errors, we include xmlns:r explicitly on legacyDrawingHF itself.
+                        txt = data.decode('utf-8', errors='replace')
+                        if 'legacyDrawingHF' not in txt:
+                            R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+                            legacy_tag = f'<legacyDrawingHF xmlns:r="{R_NS}" r:id="rIdVML"/>'
+                            txt = txt.replace('</worksheet>', legacy_tag + '</worksheet>')
+                        data = txt.encode('utf-8')
+                    elif item.filename == 'xl/media/image2.png':
+                        # Replace with template's footer image
+                        data = footer_img_content
+                    dst_z.writestr(item, data)
+                # Add VML files if not already present
+                if 'xl/drawings/vmlDrawing1.vml' not in existing:
+                    dst_z.writestr('xl/drawings/vmlDrawing1.vml', vml_content)
+                if 'xl/drawings/_rels/vmlDrawing1.vml.rels' not in existing:
+                    dst_z.writestr('xl/drawings/_rels/vmlDrawing1.vml.rels', vml_rels_content)
+                if 'xl/media/image2.png' not in existing:
+                    dst_z.writestr('xl/media/image2.png', footer_img_content)
+            patched.seek(0)
+            output = patched
+        else:
+            output.seek(0)
+
         res = send_file(output, as_attachment=True, download_name="MEDIT_Delivery Note.xlsx")
         res.headers.update({'X-Special-Match-Count': str(special_match_count), 'X-Total-Cartons': str(total_cartons), 'X-Pallet-Count': str(pallet_count), 'X-Box-Count': str(box_count)})
         return res
