@@ -92,7 +92,7 @@
         <div class="left-panel">
             <!-- 1. PDF Upload & Analysis -->
             <div class="card">
-                <h3>📦 송장 업로드 및 분석</h3>
+                <h3>송장 업로드 및 분석</h3>
                 <div class="input-group">
                     <button type="button" class="btn btn-primary" onclick="document.getElementById('add-auto-files').click()">+ 파일 선택</button>
                     <input type="file" id="add-auto-files" multiple accept=".pdf" style="display:none" onchange="addAutoFiles(this)">
@@ -132,27 +132,28 @@
                 </div>
 
                 <div style="margin-top: 1.5rem; display: flex; gap: 0.75rem;">
-                    <button type="button" class="btn btn-success" style="flex: 2;" onclick="processAll('parse')">⚡ 송장 파싱 시작</button>
-                    <button type="button" class="btn btn-outline" style="flex: 1;" onclick="processAll('print-label')">🏷️ 라벨 인쇄</button>
-                    <button type="button" class="btn btn-outline" style="flex: 1;" onclick="processAll('print-a4')">📄 A4 인쇄</button>
+                    <button type="button" class="btn btn-success" style="flex: 2;" onclick="processAll('parse')"> 송장 파싱 시작</button>
+                    <button type="button" class="btn btn-outline" style="flex: 1;" onclick="processAll('print-label')"> 라벨 인쇄</button>
+                    <button type="button" class="btn btn-outline" style="flex: 1;" onclick="processAll('print-a4')"> A4 인쇄</button>
                 </div>
             </div>
 
             <!-- 2. Picking List & Delivery Note -->
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
                 <div class="card picking-card">
-                    <h3>📋 Picking List</h3>
+                    <h3>Picking List</h3>
                     <input type="file" id="picking-list-file" accept=".pdf" style="width: calc(100% - 1.2rem); margin-bottom: 1rem;">
                     <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
                         <label for="start-page" style="font-size: 0.85rem; font-weight: 600; white-space: nowrap;">시작 페이지:</label>
                         <input type="number" id="start-page" value="1" min="1" style="width: 100%;">
                         <span style="font-size: 0.75rem; color: #888; white-space: nowrap;">(1부터 시작)</span>
                     </div>
-                    <button type="button" class="btn btn-success" style="width: 100%;" onclick="processPickingList()">Picking List 분석</button>
+                    <button type="button" class="btn btn-success" style="width: 100%; margin-bottom: 0.5rem;" onclick="processPickingList()">Picking List 분석</button>
+                    <button type="button" class="btn" style="width: 100%; background: #e67700; color: white;" onclick="highlightAndPrint()">★ 라벨링 항목 표시 & 인쇄</button>
                 </div>
 
                 <div class="card delivery-card">
-                    <h3>🚚 Delivery Note</h3>
+                    <h3>Delivery Note</h3>
                     <input type="file" id="source-excel-file" accept=".xls,.xlsx" style="width: calc(100% - 1.2rem); margin-bottom: 1rem;">
                     <div style="display: flex; gap: 1rem; margin-bottom: 1rem;">
                         <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem;">
@@ -507,7 +508,7 @@
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = "picking_list_results.xlsx";
+                    a.download = "trackingNo_upload.xlsx";
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
@@ -521,6 +522,45 @@
                 statusDiv.innerText = '오류가 발생했습니다.';
             }
         }
+
+        async function highlightAndPrint() {
+            const fileInput = document.getElementById('picking-list-file');
+            if (!fileInput.files[0]) { alert('Picking List PDF 파일을 선택해주세요.'); return; }
+
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerText = '라벨링 항목 표시 중...';
+
+            const formData = new FormData();
+            formData.append('picking_list', fileInput.files[0]);
+
+            try {
+                const response = await fetch('/highlight_picking_list', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const iframe = document.createElement('iframe');
+                    iframe.style.display = 'none';
+                    iframe.src = url;
+                    document.body.appendChild(iframe);
+                    iframe.onload = function() {
+                        iframe.contentWindow.focus();
+                        iframe.contentWindow.print();
+                        statusDiv.innerText = '인쇄창이 열렸습니다.';
+                    };
+                } else {
+                    const err = await response.json();
+                    statusDiv.innerText = '오류: ' + (err.error || '처리 실패');
+                }
+            } catch (e) {
+                console.error(e);
+                statusDiv.innerText = '오류가 발생했습니다.';
+            }
+        }
+
 
         async function processAll(action) {
             if (allFiles.length === 0) { alert('파일을 먼저 추가해주세요.'); return; }

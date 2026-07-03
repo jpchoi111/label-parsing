@@ -555,5 +555,116 @@ def generate_delivery_note():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/highlight_picking_list', methods=['POST'])
+def highlight_picking_list():
+    file = request.files.get('picking_list')
+    if not file:
+        return jsonify({"error": "파일을 업로드해주세요."}), 400
+    try:
+        import pdfplumber
+        from pypdf import PdfReader, PdfWriter
+        import reportlab.pdfgen.canvas as rl_canvas
+        from reportlab.lib.colors import HexColor
+        import io
+
+        input_bytes = file.read()
+
+        # 시작 페이지 판단: "Packing No." + "OrderNo."가 있는 페이지부터가 진짜 데이터
+        # (요약/Picking Total List 페이지는 건너뜀 — parse_picking_list_endpoint와 동일 기준)
+        reader = PdfReader(io.BytesIO(input_bytes))
+        writer = PdfWriter()
+
+        highlight_color = HexColor('#FFD700')   # 골드 노란색 박스
+        border_color = HexColor('#FF8C00')       # 주황 테두리
+        star_color = HexColor('#CC0000')         # 빨간 별표 텍스트
+
+        with pdfplumber.open(io.BytesIO(input_bytes)) as pdf:
+            for page_num in range(len(reader.pages)):
+                page = reader.pages[page_num]
+                plumber_page = pdf.pages[page_num]
+                text = page.extract_text() or ""
+
+                # Picking Total List 요약 페이지는 그대로 통과 (수정 없음)
+                if "Packing No." not in text or "OrderNo." not in text:
+                    writer.add_page(page)
+                    continue
+
+                # 이 페이지에 SPECIAL_CODES가 있는지 확인
+                matched_codes = [code for code in SPECIAL_CODES if code in text]
+                if not matched_codes:
+                    writer.add_page(page)
+                    continue
+
+                page_width = float(page.mediabox.width)
+                page_height = float(page.mediabox.height)
+
+                # pdfplumber 좌표계: top-left 기준 (y가 위에서 아래로 증가)
+                # reportlab 좌표계: bottom-left 기준 (y가 아래에서 위로 증가)
+                # 따라서 reportlab_y = page_height - plumber_y
+
+                words = plumber_page.extract_words()
+
+                overlay_buf = io.BytesIO()
+                c = rl_canvas.Canvas(overlay_buf, pagesize=(page_width, page_height))
+
+                drawn_lines = set()  # 같은 줄(top 좌표) 중복 박스 방지
+
+                for code in matched_codes:
+                    # 코드 문자열과 정확히 일치하는 단어를 찾음
+                    for w in words:
+                        if w['text'] == code:
+                            top = w['top']
+                            line_key = round(top, 1)
+                            if line_key in drawn_lines:
+                                continue
+                            drawn_lines.add(line_key)
+
+                            # 해당 줄(top 기준 ±2pt)에 속한 모든 단어를 모아 줄 전체 폭 계산
+                            line_words = [
+                                lw for lw in words
+                                if abs(lw['top'] - top) < 2
+                            ]
+                            if not line_words:
+                                continue
+
+                            x0 = min(lw['x0'] for lw in line_words) - 4
+                            x1 = max(lw['x1'] for lw in line_words) + 4
+                            line_top = min(lw['top'] for lw in line_words)
+                            line_bottom = max(lw['bottom'] for lw in line_words)
+
+                            box_y0 = page_height - line_bottom - 2
+                            box_y1 = page_height - line_top + 2
+                            box_height = box_y1 - box_y0
+
+                            # 하이라이트 박스
+                            c.setFillColorRGB(1, 0.84, 0, alpha=0.35)
+                            c.setStrokeColor(border_color)
+                            c.setLineWidth(1)
+                            c.rect(x0, box_y0, x1 - x0 + 20, box_height,
+                                   fill=1, stroke=1)
+
+                            # 별표 표시 (박스 왼쪽 바깥)
+                            c.setFillColor(star_color)
+                            c.setFont("Helvetica-Bold", 11)
+                            c.drawString(max(x0 - 18, 2), box_y0 + 2, "★")
+
+                c.save()
+                overlay_buf.seek(0)
+
+                overlay_reader = PdfReader(overlay_buf)
+                overlay_page = overlay_reader.pages[0]
+                page.merge_page(overlay_page)
+                writer.add_page(page)
+
+        output = io.BytesIO()
+        writer.write(output)
+        output.seek(0)
+        return send_file(output, mimetype='application/pdf',
+                          as_attachment=False,
+                          download_name='picking_highlighted.pdf')
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
