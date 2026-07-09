@@ -484,31 +484,45 @@
             }
         }
 
-        async function processPickingList() {
+        async function processPickingList(missingOverrides = {}) {
             const fileInput = document.getElementById('picking-list-file');
             const startPageInput = document.getElementById('start-page');
             if (!fileInput.files[0]) { alert('Picking List PDF 파일을 선택해주세요.'); return; }
-            
+
             const statusDiv = document.getElementById('status');
             statusDiv.innerText = 'Picking List 분석 중...';
-            
+
             const formData = new FormData();
             formData.append('picking_list', fileInput.files[0]);
             formData.append('start_page', startPageInput.value);
-            formData.append('tracking_data', JSON.stringify(currentAnalysisResults));  // 활성 항목만
-            
+            formData.append('tracking_data', JSON.stringify(currentAnalysisResults));
+            formData.append('missing_overrides', JSON.stringify(missingOverrides));
+
             try {
                 const response = await fetch('/parse_picking_list', {
                     method: 'POST',
                     body: formData
                 });
-                
+
+                const contentType = response.headers.get('content-type') || '';
+
+                if (response.ok && contentType.includes('application/json')) {
+                    const data = await response.json();
+
+                    if (data.status === 'missing') {
+                        // 누락 항목 모달 표시
+                        showMissingModal(data.missing, missingOverrides);
+                        statusDiv.innerText = data.message;
+                        return;
+                    }
+                }
+
                 if (response.ok) {
                     const blob = await response.blob();
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = "trackingNo_upload.xlsx";
+                    a.download = "picking_list_results.xlsx";
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
@@ -522,6 +536,85 @@
                 statusDiv.innerText = '오류가 발생했습니다.';
             }
         }
+
+        function showMissingModal(missingList, existingOverrides) {
+            // 기존 모달 제거
+            const existing = document.getElementById('missing-modal');
+            if (existing) existing.remove();
+
+            const modal = document.createElement('div');
+            modal.id = 'missing-modal';
+            modal.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.5); z-index: 9999;
+                display: flex; align-items: center; justify-content: center;
+            `;
+
+            let rows = missingList.map(item => `
+                <tr>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 0.85rem; color: #333;">${item.order_no}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 0.85rem; color: #666;">${item.tracking || '-'}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee;">
+                        <input type="text"
+                            id="packing-${item.order_no}"
+                            placeholder="Packing No. 입력"
+                            style="padding: 4px 8px; border: 1px solid #dee2e6; border-radius: 4px; font-size: 0.85rem; width: 200px;">
+                    </td>
+                </tr>
+            `).join('');
+
+            modal.innerHTML = `
+                <div style="background: white; border-radius: 12px; padding: 2rem; max-width: 700px; width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+                    <h3 style="margin-top: 0; color: #dc3545; font-size: 1.1rem;">⚠️ Picking List 누락 항목 발견</h3>
+                    <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+                        아래 SAP Order가 Picking List에 없습니다.<br>
+                        Packing No.를 직접 입력하면 포함되고, 비워두면 제외됩니다.
+                    </p>
+                    <table style="width: 100%; border-collapse: collapse; margin-bottom: 1.5rem;">
+                        <thead>
+                            <tr style="background: #f8f9fa;">
+                                <th style="padding: 8px 12px; text-align: left; font-size: 0.8rem; color: #888; border-bottom: 2px solid #dee2e6;">SAP Order</th>
+                                <th style="padding: 8px 12px; text-align: left; font-size: 0.8rem; color: #888; border-bottom: 2px solid #dee2e6;">Tracking No</th>
+                                <th style="padding: 8px 12px; text-align: left; font-size: 0.8rem; color: #888; border-bottom: 2px solid #dee2e6;">Packing No.</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                    <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
+                        <button onclick="submitMissingModal()" class="btn btn-primary" style="padding: 0.5rem 1.5rem;">확인 (입력한 항목 포함)</button>
+                        <button onclick="skipMissingModal()" class="btn btn-outline" style="padding: 0.5rem 1.5rem;">모두 건너뛰기</button>
+                    </div>
+                </div>
+            `;
+
+            document.body.appendChild(modal);
+
+            // 현재 누락 목록을 전역에 저장
+            window._missingList = missingList;
+            window._existingOverrides = existingOverrides;
+        }
+
+        function submitMissingModal() {
+            const overrides = { ...window._existingOverrides };
+            window._missingList.forEach(item => {
+                const input = document.getElementById(`packing-${item.order_no}`);
+                if (input && input.value.trim()) {
+                    overrides[item.order_no] = input.value.trim();
+                }
+            });
+            document.getElementById('missing-modal').remove();
+            processPickingList(overrides);
+        }
+
+        function skipMissingModal() {
+            // 누락 항목 전부 빈 값으로 override → 서버에서 unresolved_missing 없다고 판단해 엑셀 생성
+            const overrides = { ...window._existingOverrides };
+            window._missingList.forEach(item => {
+                overrides[item.order_no] = '';  // 빈 값 = 제외
+            });
+            document.getElementById('missing-modal').remove();
+            processPickingList(overrides);
+        }        
 
         async function highlightAndPrint() {
             const fileInput = document.getElementById('picking-list-file');

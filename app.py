@@ -92,99 +92,118 @@ def is_valid_label_page(page):
 
 def extract_single_pdf(file_content, filename, manual_ref=None):
     stream = BytesIO(file_content)
+    results = []
     try:
         r = PdfReader(stream)
-        first_page = r.pages[0]
-        full_text = first_page.extract_text() or ""
-        
-        w, h = float(first_page.mediabox.width), float(first_page.mediabox.height)
-        # Threshold changed to 600 to avoid misclassifying larger labels as A4
-        size = "a4" if (w > 600 or h > 600) else "label"
-        is_sideways_a4 = (size == "a4") and (w > h)
-        
-        if not full_text.strip():
-            full_text = first_page.extract_text(orientations=(90,)) or ""
+        seen_waybills = set()  # 중복 Waybill 제거용
 
+        for page_idx in range(len(r.pages)):
+            try:
+                page = r.pages[page_idx]
+                full_text = page.extract_text() or ""
 
-        def find_data(text):
-            normalized = " ".join(text.split())
+                # Shipment Receipt / Waybill Doc 등 불필요한 페이지 스킵
+                _text_lower = full_text.lower()
+                _skip_keywords = ["shipment receipt", "waybill doc", "receipt", "archive doc", "copy for your records"]
+                if any(kw in _text_lower for kw in _skip_keywords):
+                    continue
 
-            # --- Ref No 파싱 ---
-            ref_res = "Not Found"
-            if manual_ref:
-                ref_res = manual_ref
-            else:
-                # 1순위: 원본 텍스트에서 "Ref No:" 줄 파싱 (suffix -XXXX 포함 전체)
-                ref_line = re.search(r'Ref\s*No[:\s]+([\d][0-9;\-,\s]{5,80})', text, re.IGNORECASE)
-                if ref_line:
-                    candidate = ref_line.group(1).strip()
-                    # 숫자/구분자 이외 문자가 나오면 거기서 자름
-                    candidate = re.split(r'[^\d;\-,\s]', candidate)[0].strip()
-                    if len(re.sub(r'\D', '', candidate)) >= 7:
-                        ref_res = candidate
+                w, h = float(page.mediabox.width), float(page.mediabox.height)
+                size = "a4" if (w > 600 or h > 600) else "label"
+                is_sideways_a4 = (size == "a4") and (w > h)
 
-                # 2순위: normalized에서 400xxxxxxx 형태 SAP 번호 직접 수집
-                if ref_res == "Not Found" or len(re.sub(r'\D', '', ref_res)) < 7:
-                    all_sap = re.findall(r'\b(400\d{7})\b', normalized)
-                    if all_sap:
-                        ref_res = "; ".join(sorted(list(set(all_sap))))
+                if not full_text.strip():
+                    full_text = page.extract_text(orientations=(90,)) or ""
 
-                # 3순위: 기타 Order/Reference 패턴 (fallback)
-                if ref_res == "Not Found":
-                    ref_match = re.search(
-                        r'(?:Order|P/O|Shipment|Reference)[:\s]*([40RMA\d\s\-\;\,]{7,})',
-                        normalized, re.IGNORECASE
-                    )
-                    if ref_match:
-                        ref_res = re.split(r'\s{2,}', ref_match.group(1).strip())[0]
+                def find_data(text):
+                    normalized = " ".join(text.split())
 
-            # --- Tracking 파싱 (기존 유지) ---
-            track_res = "Not Found"
-            waybill_patterns = [
-                r'WAYBILL\s*[:\s]*([\d\s]{10,25})',
-                r'\b([71]\d[\d\s]{8,15}\d)\b',
-                r'\b([71]\d{9})\b',
-                r'\b(18\d{8})\b'
-            ]
-            for pattern in waybill_patterns:
-                match = re.search(pattern, normalized, re.IGNORECASE)
-                if match:
-                    val = match.group(1 if "(" in pattern else 0)
-                    digits = re.sub(r'\D', '', val)
-                    if len(digits) >= 10:
-                        temp_track = digits[:10]
-                        if temp_track not in ref_res:
-                            track_res = temp_track
+                    # --- Ref No 파싱 ---
+                    ref_res = "Not Found"
+                    if manual_ref:
+                        ref_res = manual_ref
+                    else:
+                        ref_line = re.search(r'Ref\s*(?:No)?[:\s]+([\d][0-9;\-,\s]{5,80})', text, re.IGNORECASE)
+                        if ref_line:
+                            candidate = ref_line.group(1).strip()
+                            candidate = re.split(r'[^\d;\-,\s]', candidate)[0].strip()
+                            if len(re.sub(r'\D', '', candidate)) >= 7:
+                                ref_res = candidate
+                        if ref_res == "Not Found" or len(re.sub(r'\D', '', ref_res)) < 7:
+                            all_sap = re.findall(r'\b(400\d{7})\b', normalized)
+                            if all_sap:
+                                ref_res = "; ".join(sorted(list(set(all_sap))))
+                        if ref_res == "Not Found":
+                            ref_match = re.search(
+                                r'(?:Order|P/O|Shipment|Reference)[:\s]*([40RMA\d\s\-\;\,]{7,})',
+                                normalized, re.IGNORECASE
+                            )
+                            if ref_match:
+                                ref_res = re.split(r'\s{2,}', ref_match.group(1).strip())[0]
+
+                    # --- Tracking 파싱 ---
+                    track_res = "Not Found"
+                    waybill_patterns = [
+                        r'WAYBILL\s*[:\s]*([\d\s]{10,25})',
+                        r'\b([71]\d[\d\s]{8,15}\d)\b',
+                        r'\b([71]\d{9})\b',
+                        r'\b(18\d{8})\b'
+                    ]
+                    for pattern in waybill_patterns:
+                        match = re.search(pattern, normalized, re.IGNORECASE)
+                        if match:
+                            val = match.group(1 if "(" in pattern else 0)
+                            digits = re.sub(r'\D', '', val)
+                            if len(digits) >= 10:
+                                temp_track = digits[:10]
+                                if temp_track not in ref_res:
+                                    track_res = temp_track
+                                    break
+                    return ref_res, track_res
+
+                ref_raw, tracking_no = find_data(full_text)
+
+                # OCR fallback
+                if tracking_no == "Not Found" or ref_raw == "Not Found":
+                    stream.seek(0)
+                    doc = pdfium.PdfDocument(stream)
+                    plumb_page = doc[page_idx]
+                    rots = [90] if is_sideways_a4 else [0, 90]
+                    for rot in rots:
+                        bitmap = plumb_page.render(scale=2.0, rotation=rot)
+                        with ocr_lock:
+                            ocr_result = reader.readtext(np.array(bitmap.to_pil()), detail=0)
+                        page_text = " ".join(ocr_result)
+                        temp_ref, temp_track = find_data(page_text)
+                        if temp_ref != "Not Found": ref_raw = temp_ref
+                        if temp_track != "Not Found":
+                            tracking_no = temp_track
                             break
-            return ref_res, track_res
+                    doc.close()
 
-        ref_raw, tracking_no = find_data(full_text)
+                # Waybill 기준 중복 페이지 건너뜀 (같은 shipment의 2/3, 3/3 등)
+                if tracking_no != "Not Found" and tracking_no != "Error":
+                    if tracking_no in seen_waybills:
+                        continue
+                    seen_waybills.add(tracking_no)
 
-        # Fallback to OCR if tracking is missing or ref is missing (especially for A4 where extract_text might be partial)
-        if tracking_no == "Not Found" or ref_raw == "Not Found":
-            stream.seek(0)
-            doc = pdfium.PdfDocument(stream)
-            page = doc[0]
-            rots = [90] if is_sideways_a4 else [0, 90]
-            ocr_text = ""
-            for rot in rots:
-                bitmap = page.render(scale=2.0, rotation=rot)
-                with ocr_lock:
-                    ocr_result = reader.readtext(np.array(bitmap.to_pil()), detail=0)
-                page_text = " ".join(ocr_result)
-                ocr_text += page_text + "\n"
-                
-                temp_ref, temp_track = find_data(page_text)
-                if temp_ref != "Not Found": ref_raw = temp_ref
-                if temp_track != "Not Found": 
-                    tracking_no = temp_track
-                    break # Found it!
-            doc.close()
-        
-        return ref_raw, tracking_no, size
+                results.append((ref_raw, tracking_no, size))
+
+            except Exception as e:
+                print(f"Error on page {page_idx} of {filename}: {e}")
+                continue
+
     except Exception as e:
         print(f"Error processing {filename}: {e}")
-        return manual_ref if manual_ref else "Error", "Error", "Unknown"
+        if manual_ref:
+            results.append((manual_ref, "Error", "Unknown"))
+        else:
+            results.append(("Error", "Error", "Unknown"))
+
+    if not results:
+        return [("Not Found", "Not Found", "Unknown")]
+    return results
+
 
 @app.route('/')
 def index():
@@ -219,17 +238,19 @@ def parse():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(extract_single_pdf, d[0], d[1], d[2]) for d in file_data]
         for future in futures:
-            ref_raw, track, size = future.result()
-            expanded_refs = expand_ref_numbers(ref_raw)
-            for ref in expanded_refs:
-                results.append({
-                    "Ref No": ref,
-                    "Tracking Number": track,
-                    "Size Type": size
-                })
+            page_results = future.result()  # 이제 리스트
+            for ref_raw, track, size in page_results:
+                expanded_refs = expand_ref_numbers(ref_raw)
+                for ref in expanded_refs:
+                    results.append({
+                        "Ref No": ref,
+                        "Tracking Number": track,
+                        "Size Type": size
+                    })
             if job_id and job_id in progress_data:
                 progress_data[job_id]["current"] += 1
-    
+
+
     if job_id and job_id in progress_data:
         del progress_data[job_id]
 
@@ -241,22 +262,33 @@ from datetime import datetime
 def parse_picking_list_endpoint():
     file = request.files.get('picking_list')
     tracking_data_json = request.form.get('tracking_data', '[]')
+    missing_overrides_json = request.form.get('missing_overrides', '{}')  # 추가
     if not file:
         return jsonify({"error": "Picking List 파일을 업로드해주세요."}), 400
     try:
         tracking_map = {}
+        sap_orders = set()
         try:
             tracking_list = json.loads(tracking_data_json)
             for item in tracking_list:
-                ref = item.get('Ref No')
-                track = item.get('Tracking Number')
+                ref = item.get('Ref No', '').strip()
+                track = item.get('Tracking Number', '').strip()
+                if ref and ref != "Not Found":
+                    sap_orders.add(ref)
                 if ref and track and track != "Not Found":
                     tracking_map[ref] = track
         except:
             pass
+
+        # missing_overrides: { "4000003968": "20260708_4000003968_MF" }
+        try:
+            missing_overrides = json.loads(missing_overrides_json)
+        except:
+            missing_overrides = {}
+
         stream = BytesIO(file.read())
         reader = PdfReader(stream)
-        
+
         try:
             start_page = int(request.form.get('start_page', 1)) - 1
             if start_page < 0: start_page = 0
@@ -265,9 +297,11 @@ def parse_picking_list_endpoint():
 
         orders = []
         seen_packing_nos = set()
+        matched_orders = set()  # Picking List에서 매칭된 SAP Order 추적
+
         for i in range(start_page, len(reader.pages)):
             text = reader.pages[i].extract_text()
-            if "Packing No." not in text or "OrderNo." not in text:
+            if not text or ("Packing No." not in text or "OrderNo." not in text):
                 continue
             parts = re.split(r'(Packing No\.)', text)
             for j in range(1, len(parts), 2):
@@ -282,11 +316,40 @@ def parse_picking_list_endpoint():
                         user_id = u_match.group(1)
                         if packing_no not in seen_packing_nos:
                             seen_packing_nos.add(packing_no)
+                            matched_orders.add(order_no)
                             company_name = "MEDIT EUROPE GMBH" if user_id == "MEDITFRA" else ("MEDIT EUROPE" if user_id == "MEDITRMA" else "")
                             track_no = tracking_map.get(order_no, "")
                             orders.append({"A": "", "B": packing_no, "C": company_name, "D": "", "E": track_no})
+
+        # 누락 감지: 파싱 결과엔 있는데 Picking List에 없는 SAP Order
+        missing_orders = []
+        for sap in sap_orders:
+            if sap not in matched_orders and sap != "Not Found":
+                missing_orders.append({
+                    "order_no": sap,
+                    "tracking": tracking_map.get(sap, "")
+                })
+
+        # missing_overrides로 Packing No. 받은 누락 항목 추가
+        for sap, packing_no in missing_overrides.items():
+            if not packing_no.strip():
+                continue
+            track_no = tracking_map.get(sap, "")
+            # UserID 모르므로 company_name 비움 (필요시 수동 입력 가능)
+            orders.append({"A": "", "B": packing_no.strip(), "C": "", "D": "", "E": track_no})
+
+        # 누락 있고 아직 override 안 받은 상태면 → 누락 목록 먼저 반환
+        unresolved_missing = [m for m in missing_orders if m['order_no'] not in missing_overrides]
+        if unresolved_missing:
+            return jsonify({
+                "status": "missing",
+                "missing": unresolved_missing,
+                "message": f"{len(unresolved_missing)}개의 SAP Order가 Picking List에 없습니다."
+            }), 200
+
         if not orders:
             return jsonify({"error": "오더를 찾을 수 없습니다."}), 404
+
         df = pd.DataFrame(orders)
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -297,6 +360,8 @@ def parse_picking_list_endpoint():
         return send_file(output, as_attachment=True, download_name="picking_list_results.xlsx")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
 
 @app.route('/download_excel', methods=['POST'])
 def download_excel():
