@@ -185,7 +185,7 @@
                     <div style="font-size: 0.78rem; font-weight: 600; color: #2f9e44; margin-bottom: 0.4rem; display: flex; align-items: center; gap: 0.4rem;">
                         활성 항목 <span id="active-count-badge" class="active-count-badge">0개</span>
                     </div>
-                    <div class="table-wrapper" style="margin-top: 0; max-height: 280px;">
+                    <div class="table-wrapper" style="margin-top: 0; max-height: 550px;">
                         <table id="results-table">
                             <thead>
                                 <tr>
@@ -388,13 +388,28 @@
         }
 
         function displayResults(results) {
-            currentAnalysisResults = currentAnalysisResults.concat(results);
+            // 중복 제거: Ref No + Tracking Number 조합이 같으면 스킵
+            const existingKeys = new Set(
+                currentAnalysisResults.map(r => `${r['Ref No']}|${r['Tracking Number']}`)
+            );
+            const newResults = results.filter(r => {
+                const key = `${r['Ref No']}|${r['Tracking Number']}`;
+                if (existingKeys.has(key)) return false;
+                existingKeys.add(key);
+                return true;
+            });
+
+            currentAnalysisResults = currentAnalysisResults.concat(newResults);
+
             document.getElementById('welcome-card').style.display = 'none';
             const section = document.getElementById('results-section');
             section.style.display = 'flex';
             section.style.flexDirection = 'column';
+
             renderResultsTable();
         }
+
+
 
         async function downloadExcel() {
             if (currentAnalysisResults.length === 0) return;
@@ -625,6 +640,7 @@
 
             const formData = new FormData();
             formData.append('picking_list', fileInput.files[0]);
+            formData.append('tracking_data', JSON.stringify(currentAnalysisResults));    
 
             try {
                 const response = await fetch('/highlight_picking_list', {

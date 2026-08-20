@@ -10,14 +10,16 @@ import tempfile
 import pypdfium2 as pdfium
 import easyocr
 import numpy as np
+import zxingcpp
 from PIL import Image
 import zipfile
 import threading
 
 app = Flask(__name__)
 
-# Lock for thread-safe OCR access
+# Lock for thread-safe
 ocr_lock = threading.Lock()
+pdfium_lock = threading.Lock() 
 
 # Helper to extract images from template if they don't exist
 def ensure_images_extracted():
@@ -68,86 +70,146 @@ def expand_ref_numbers(ref_str):
     for p in parts:
         if not p: continue
         clean_p = re.sub(r'^RMA-?', '', p, flags=re.IGNORECASE).strip()
+        digits_only = re.sub(r'\D', '', clean_p)
         if clean_p.startswith('400'):
             expanded.append(clean_p)
             base_prefix = clean_p[:6]
-        elif clean_p.startswith('-') and base_prefix:
-            expanded.append(base_prefix + clean_p[1:])
+        elif base_prefix and 0 < len(digits_only) < 6:
+            # 하이픈이 OCR로 소실돼도(예: "-4218" -> "4218") suffix로 처리
+            expanded.append(base_prefix + digits_only)
         else:
-            digits = re.sub(r'\D', '', clean_p)
-            if digits:
-                expanded.append(digits)
+            if digits_only:
+                expanded.append(digits_only)
     return expanded
 
-def is_valid_label_page(page):
+def decode_top_barcode(pdf_bytes, page_idx, scale=3.0):
+    """숫자로만 이루어진 바코드를 찾아서 원본 그대로 반환 (포맷 무관, 자르지 않음)"""
+    try:
+        with pdfium_lock:
+            doc = pdfium.PdfDocument(BytesIO(pdf_bytes))
+            page = doc[page_idx]
+            bitmap = page.render(scale=scale)
+            img = bitmap.to_pil()
+            doc.close()
+
+        results = zxingcpp.read_barcodes(img)
+        candidates = [r.text for r in results if r.text.isdigit() and len(r.text) >= 10]
+        if candidates:
+            # 가장 긴 값이 원본 스캔값에 가장 가까움 (DHL은 Code39 10자리, FedEx는 Code128 34자리 모두 커버)
+            return max(candidates, key=len)
+    except Exception:
+        pass
+    return None
+
+
+def classify_carrier(text):
+    """라벨 텍스트로 DHL/FedEx 구분"""
+    if re.search(r'WAYBILL', text, re.IGNORECASE):
+        return 'dhl'
+    if re.search(r'TRK#|MPS#|##\s*MASTER\s*##', text, re.IGNORECASE):
+        return 'fedex'
+    return 'dhl'  # 기본값
+
+CATEGORY_ORDER = {
+    ('dhl', False): 0,    # normal-dhl
+    ('fedex', False): 1,  # normal-fedex
+    ('dhl', True): 2,     # rma-dhl
+    ('fedex', True): 3,   # rma-fedex
+}
+
+def category_label(carrier, is_rma):
+    return ('rma-' if is_rma else 'normal-') + carrier
+
+def is_valid_label_page(page, is_last_page=False, pdf_bytes=None, page_idx=None):
     text = page.extract_text()
-    if not text or not text.strip():
+    exclude_keywords = ["waybill doc", "receipt", "archive doc", "copy for your records", "carriage value", "customs value"]
+
+    if text and text.strip():
+        text_lower = text.lower()
+        for kw in exclude_keywords:
+            if kw in text_lower:
+                return False
         return True
-    text_lower = text.lower()
-    exclude_keywords = ["waybill doc", "receipt", "archive doc", "copy for your records"]
-    for kw in exclude_keywords:
-        if kw in text_lower:
-            return False
+
+    # 텍스트 없는 페이지는 보통 벡터 라벨이라 그대로 통과.
+    # 단, 파일의 "마지막 페이지"는 Shipment Receipt(역시 텍스트 없는 벡터형)일 가능성이 높으니
+    # 이 경우에만 OCR로 한 번 확인 (전체 페이지에 OCR 걸지 않음 = 속도 유지)
+    if is_last_page and pdf_bytes is not None and page_idx is not None:
+        try:
+            doc = pdfium.PdfDocument(BytesIO(pdf_bytes))
+            p = doc[page_idx]
+            bitmap = p.render(scale=1.5, rotation=0)
+            with ocr_lock:
+                ocr_text = " ".join(reader.readtext(np.array(bitmap.to_pil()), detail=0))
+            doc.close()
+            ocr_lower = ocr_text.lower()
+            for kw in exclude_keywords:
+                if kw in ocr_lower:
+                    return False
+        except Exception:
+            pass
+
     return True
 
 def extract_single_pdf(file_content, filename, manual_ref=None):
     stream = BytesIO(file_content)
     results = []
+
+    is_rma_file = bool(re.search(r'RMA', filename, re.IGNORECASE))
+
+    filename_ref = None
+    if not manual_ref:
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        stem = re.sub(r'^RMA-?', '', stem, flags=re.IGNORECASE)
+        candidate = re.sub(r'[^0-9\-]+', ';', stem).strip(';')
+        first_part = candidate.split(';')[0]
+        if first_part.startswith('400') and len(first_part) >= 7:
+            filename_ref = candidate
+
     try:
         r = PdfReader(stream)
-        seen_waybills = set()  # 중복 Waybill 제거용
+        seen_waybills = set()
+        num_pages = len(r.pages)
+        page_idx = 0
 
-        for page_idx in range(len(r.pages)):
+        while page_idx < num_pages:
             try:
                 page = r.pages[page_idx]
                 full_text = page.extract_text() or ""
 
-                # Shipment Receipt / Waybill Doc 등 불필요한 페이지 스킵
                 _text_lower = full_text.lower()
-                _skip_keywords = ["shipment receipt", "waybill doc", "receipt", "archive doc", "copy for your records"]
+                _skip_keywords = [
+                    "shipment receipt", "waybill doc", "receipt", "archive doc",
+                    "copy for your records", "carriage value", "customs value"
+                ]
                 if any(kw in _text_lower for kw in _skip_keywords):
+                    page_idx += 1
                     continue
 
                 w, h = float(page.mediabox.width), float(page.mediabox.height)
                 size = "a4" if (w > 600 or h > 600) else "label"
-                is_sideways_a4 = (size == "a4") and (w > h)
-
-                if not full_text.strip():
-                    full_text = page.extract_text(orientations=(90,)) or ""
 
                 def find_data(text):
                     normalized = " ".join(text.split())
-
-                    # --- Ref No 파싱 ---
                     ref_res = "Not Found"
-                    if manual_ref:
-                        ref_res = manual_ref
-                    else:
-                        ref_line = re.search(r'Ref\s*(?:No)?[:\s]+([\d][0-9;\-,\s]{5,80})', text, re.IGNORECASE)
-                        if ref_line:
-                            candidate = ref_line.group(1).strip()
-                            candidate = re.split(r'[^\d;\-,\s]', candidate)[0].strip()
-                            if len(re.sub(r'\D', '', candidate)) >= 7:
-                                ref_res = candidate
-                        if ref_res == "Not Found" or len(re.sub(r'\D', '', ref_res)) < 7:
-                            all_sap = re.findall(r'\b(400\d{7})\b', normalized)
-                            if all_sap:
-                                ref_res = "; ".join(sorted(list(set(all_sap))))
-                        if ref_res == "Not Found":
-                            ref_match = re.search(
-                                r'(?:Order|P/O|Shipment|Reference)[:\s]*([40RMA\d\s\-\;\,]{7,})',
-                                normalized, re.IGNORECASE
-                            )
-                            if ref_match:
-                                ref_res = re.split(r'\s{2,}', ref_match.group(1).strip())[0]
+                    ref_line = re.search(r'Ref\s*(?:No)?[:\s]+([\d][0-9;\-,\s]{5,80})', text, re.IGNORECASE)
+                    if ref_line:
+                        candidate = ref_line.group(1).strip()
+                        candidate = re.split(r'[^\d;\-,\s]', candidate)[0].strip()
+                        if len(re.sub(r'\D', '', candidate)) >= 7:
+                            ref_res = candidate
+                    if ref_res == "Not Found" or len(re.sub(r'\D', '', ref_res)) < 7:
+                        all_sap = re.findall(r'\b(400\d{7})\b', normalized)
+                        if all_sap:
+                            ref_res = "; ".join(sorted(list(set(all_sap))))
 
-                    # --- Tracking 파싱 ---
                     track_res = "Not Found"
                     waybill_patterns = [
-                        r'WAYBILL\s*[:\s]*([\d\s]{10,25})',
+                        r'(?:WA)?YBILL\s*[:\s]*([\d\s]{10,25})',
                         r'\b([71]\d[\d\s]{8,15}\d)\b',
                         r'\b([71]\d{9})\b',
-                        r'\b(18\d{8})\b'
+                        r'\b(18\d{8})\b',
+                        r'\b(\d{4}\s\d{4}\s\d{4})\b'
                     ]
                     for pattern in waybill_patterns:
                         match = re.search(pattern, normalized, re.IGNORECASE)
@@ -155,7 +217,7 @@ def extract_single_pdf(file_content, filename, manual_ref=None):
                             val = match.group(1 if "(" in pattern else 0)
                             digits = re.sub(r'\D', '', val)
                             if len(digits) >= 10:
-                                temp_track = digits[:10]
+                                temp_track = digits
                                 if temp_track not in ref_res:
                                     track_res = temp_track
                                     break
@@ -163,46 +225,103 @@ def extract_single_pdf(file_content, filename, manual_ref=None):
 
                 ref_raw, tracking_no = find_data(full_text)
 
-                # OCR fallback
-                if tracking_no == "Not Found" or ref_raw == "Not Found":
+                if manual_ref:
+                    ref_raw = manual_ref
+                elif filename_ref:
+                    ref_raw = filename_ref
+
+                # 바코드가 텍스트보다 항상 정확 - 찾았으면 무조건(자르지 않고) 덮어씀
+                bc_digits = decode_top_barcode(file_content, page_idx)
+                if bc_digits:
+                    tracking_no = bc_digits
+
+                piece_total = None
+                piece_style = None  # 'slash' = DHL(1/13), 'of' = FedEx MPS(1 of 2)
+                piece_match = re.search(r'\b(\d+)/(\d+)\b', full_text)
+                if piece_match:
+                    piece_total = int(piece_match.group(2))
+                    piece_style = 'slash'
+                else:
+                    of_match = re.search(r'\b(\d+)\s+of\s+(\d+)\b', full_text, re.IGNORECASE)
+                    if of_match:
+                        piece_total = int(of_match.group(2))
+                        piece_style = 'of'
+
+                carrier_text = full_text
+
+                need_ocr = (tracking_no == "Not Found") or (ref_raw == "Not Found" and not filename_ref)
+                if need_ocr:
                     stream.seek(0)
-                    doc = pdfium.PdfDocument(stream)
-                    plumb_page = doc[page_idx]
-                    rots = [90] if is_sideways_a4 else [0, 90]
-                    for rot in rots:
-                        bitmap = plumb_page.render(scale=2.0, rotation=rot)
+                    with pdfium_lock:
+                        doc = pdfium.PdfDocument(stream)
+                        plumb_page = doc[page_idx]
+                        rots = [90] if size == "a4" else [90, 0]
+                        rendered = []
+                        for rot in rots:
+                            bitmap = plumb_page.render(scale=2.0, rotation=rot)
+                            rendered.append(bitmap.to_pil())
+                        doc.close()
+
+                    page_text = ""
+                    for rot, pil_img in zip(rots, rendered):
                         with ocr_lock:
-                            ocr_result = reader.readtext(np.array(bitmap.to_pil()), detail=0)
+                            ocr_result = reader.readtext(np.array(pil_img), detail=0)
                         page_text = " ".join(ocr_result)
+
+                        if any(kw in page_text.lower() for kw in _skip_keywords):
+                            page_text = ""
+                            break
+
+                        carrier_text += " " + page_text
                         temp_ref, temp_track = find_data(page_text)
-                        if temp_ref != "Not Found": ref_raw = temp_ref
-                        if temp_track != "Not Found":
+                        if temp_ref != "Not Found" and ref_raw == "Not Found":
+                            ref_raw = temp_ref
+                        if temp_track != "Not Found" and tracking_no == "Not Found":
                             tracking_no = temp_track
                             break
-                    doc.close()
 
-                # Waybill 기준 중복 페이지 건너뜀 (같은 shipment의 2/3, 3/3 등)
+                    if piece_total is None and page_text:
+                        piece_match = re.search(r'\b(\d+)/(\d+)\b', page_text)
+                        if piece_match:
+                            piece_total = int(piece_match.group(2))
+                            piece_style = 'slash'
+
+                carrier = classify_carrier(carrier_text)
+
                 if tracking_no != "Not Found" and tracking_no != "Error":
-                    if tracking_no in seen_waybills:
-                        continue
-                    seen_waybills.add(tracking_no)
+                    if tracking_no not in seen_waybills:
+                        seen_waybills.add(tracking_no)
+                        results.append((ref_raw, tracking_no, size, is_rma_file, carrier))
+                else:
+                    if ref_raw != "Not Found" and ref_raw != "Error":
+                        if not any(rr[0] == ref_raw for rr in results):
+                            results.append((ref_raw, tracking_no, size, is_rma_file, carrier))
 
-                results.append((ref_raw, tracking_no, size))
+                if size == "a4" and piece_total and piece_total > 1 and piece_style == 'slash':
+                    for _ in range(piece_total - 1):
+                        results.append((ref_raw, tracking_no, size, is_rma_file, carrier))
+                    page_idx += piece_total
+                elif piece_total and piece_total > 1 and piece_style == 'of':
+                    page_idx += piece_total
+                else:
+                    page_idx += 1
 
             except Exception as e:
                 print(f"Error on page {page_idx} of {filename}: {e}")
+                page_idx += 1
                 continue
 
     except Exception as e:
         print(f"Error processing {filename}: {e}")
         if manual_ref:
-            results.append((manual_ref, "Error", "Unknown"))
+            results.append((manual_ref, "Error", "Unknown", False, "dhl"))
         else:
-            results.append(("Error", "Error", "Unknown"))
+            results.append(("Error", "Error", "Unknown", False, "dhl"))
 
     if not results:
-        return [("Not Found", "Not Found", "Unknown")]
+        return [("Not Found", "Not Found", "Unknown", False, "dhl")]
     return results
+
 
 
 @app.route('/')
@@ -233,23 +352,29 @@ def parse():
         content = f.read()
         m_ref = manual_refs.get(f.filename)
         file_data.append((content, f.filename, m_ref))
-    
+
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(extract_single_pdf, d[0], d[1], d[2]) for d in file_data]
         for future in futures:
             page_results = future.result()  # 이제 리스트
-            for ref_raw, track, size in page_results:
+            for ref_raw, track, size, is_rma, carrier in page_results:
                 expanded_refs = expand_ref_numbers(ref_raw)
                 for ref in expanded_refs:
                     results.append({
                         "Ref No": ref,
                         "Tracking Number": track,
-                        "Size Type": size
+                        "Size Type": size,
+                        "Category": category_label(carrier, is_rma),
+                        "_order": CATEGORY_ORDER.get((carrier, is_rma), 99)
                     })
             if job_id and job_id in progress_data:
                 progress_data[job_id]["current"] += 1
 
+    # normal-dhl -> normal-fedex -> rma-dhl -> rma-fedex 순으로 정렬
+    results.sort(key=lambda r: r["_order"])
+    for r in results:
+        del r["_order"]
 
     if job_id and job_id in progress_data:
         del progress_data[job_id]
@@ -382,21 +507,44 @@ def print_filter():
     target_size = request.form.get('target_size')
     file_data = [(f.read(), f.filename) for f in files if f.filename.endswith('.pdf')]
     writer = PdfWriter()
-    found_any = False
+
     def check_size_worker(data_pair):
         data, name = data_pair
         return get_pdf_size(BytesIO(data)) == target_size, data
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         check_results = list(executor.map(check_size_worker, file_data))
-    for is_target, data in check_results:
-        if is_target:
-            reader = PdfReader(BytesIO(data))
-            for page in reader.pages:
-                if is_valid_label_page(page):
-                    writer.add_page(page)
-                    found_any = True
-    if not found_any:
+
+    # (order, is_rma, carrier, pages_to_add) 튜플로 모아서 나중에 정렬
+    grouped = []
+    for (is_target, data), (_, name) in zip(check_results, file_data):
+        if not is_target:
+            continue
+        is_rma_file = bool(re.search(r'RMA', name, re.IGNORECASE))
+        reader = PdfReader(BytesIO(data))
+        total = len(reader.pages)
+        pages_to_add = []
+        carrier_text = ""
+        for idx, page in enumerate(reader.pages):
+            is_last = (idx == total - 1)
+            if is_valid_label_page(page, is_last_page=is_last, pdf_bytes=data, page_idx=idx):
+                pages_to_add.append(page)
+                carrier_text += (page.extract_text() or "") + " "
+        if not pages_to_add:
+            continue
+        carrier = classify_carrier(carrier_text)
+        order = CATEGORY_ORDER.get((carrier, is_rma_file), 99)
+        grouped.append((order, pages_to_add))
+
+    if not grouped:
         return jsonify({"error": f"인쇄 가능한 {target_size} 규격의 페이지가 없습니다."}), 404
+
+    # normal-dhl -> normal-fedex -> rma-dhl -> rma-fedex 순으로 정렬해서 병합
+    grouped.sort(key=lambda g: g[0])
+    for _, pages_to_add in grouped:
+        for page in pages_to_add:
+            writer.add_page(page)
+
     output = BytesIO()
     writer.write(output)
     output.seek(0)
@@ -441,6 +589,18 @@ def generate_delivery_note():
                     if dfs: source_df = dfs[0]
         if source_df is None:
             return jsonify({"error": "엑셀 파일을 읽을 수 없습니다."}), 400
+
+        def format_trkno(val):
+            s = str(val).strip()
+            digits = re.sub(r'\D', '', s)
+            if len(digits) > 12:
+                # FedEx처럼 긴 트래킹 번호는 뒤 12자리만 남기고 FED 접두사
+                return 'FED' + digits[-12:]
+            return s
+
+        if 'TRKNO' in source_df.columns:
+            source_df['TRKNO'] = source_df['TRKNO'].apply(format_trkno)
+
         data_to_fill = source_df[['TRKNO', 'ORDERNO', 'CUSITEMCODE', 'ITEMDETAIL', 'SRL_LOT']]
         special_match_count = sum(1 for code in source_df['CUSITEMCODE'].astype(str).str.strip() if code in SPECIAL_CODES) if 'CUSITEMCODE' in source_df.columns else 0
         total_cartons = int(pd.to_numeric(source_df['BOXCNT'], errors='coerce').sum()) if 'BOXCNT' in source_df.columns else 0
@@ -620,10 +780,12 @@ def generate_delivery_note():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+CATEGORY_ORDER_BY_LABEL = {category_label(carrier, is_rma): order for (carrier, is_rma), order in CATEGORY_ORDER.items()}
 
 @app.route('/highlight_picking_list', methods=['POST'])
 def highlight_picking_list():
     file = request.files.get('picking_list')
+    tracking_data_json = request.form.get('tracking_data', '[]')
     if not file:
         return jsonify({"error": "파일을 업로드해주세요."}), 400
     try:
@@ -633,16 +795,39 @@ def highlight_picking_list():
         from reportlab.lib.colors import HexColor
         import io
 
-        input_bytes = file.read()
+        # Ref No -> Tracking Number / Category 매핑
+        tracking_map = {}
+        category_map = {}
+        try:
+            tracking_list = json.loads(tracking_data_json)
+            for item in tracking_list:
+                ref = item.get('Ref No', '').strip()
+                track = item.get('Tracking Number', '').strip()
+                if ref and track and track != "Not Found":
+                    tracking_map[ref] = track
+                if ref:
+                    category_map[ref] = item.get('Category', 'normal-dhl')
+        except:
+            pass
 
-        # 시작 페이지 판단: "Packing No." + "OrderNo."가 있는 페이지부터가 진짜 데이터
-        # (요약/Picking Total List 페이지는 건너뜀 — parse_picking_list_endpoint와 동일 기준)
+        FEDEX_TRACKING_MIN_LEN = 15
+
+        def is_fedex_order(order_no):
+            track = tracking_map.get(order_no, "")
+            digits = re.sub(r'\D', '', track)
+            return len(digits) >= FEDEX_TRACKING_MIN_LEN
+
+        input_bytes = file.read()
         reader = PdfReader(io.BytesIO(input_bytes))
         writer = PdfWriter()
 
-        highlight_color = HexColor('#FFD700')   # 골드 노란색 박스
-        border_color = HexColor('#FF8C00')       # 주황 테두리
-        star_color = HexColor('#CC0000')         # 빨간 별표 텍스트
+        highlight_color = HexColor('#FFD700')
+        border_color = HexColor('#FF8C00')
+        star_color = HexColor('#CC0000')
+        fedex_color = HexColor("#F73B0C")
+
+        fixed_pages = []      # 요약 페이지 등, 순서 그대로 유지할 페이지 (원래 인덱스, page)
+        order_pages = []      # 개별 오더 페이지 (카테고리 순서, 원래 인덱스, page) - 정렬 대상
 
         with pdfplumber.open(io.BytesIO(input_bytes)) as pdf:
             for page_num in range(len(reader.pages)):
@@ -650,77 +835,117 @@ def highlight_picking_list():
                 plumber_page = pdf.pages[page_num]
                 text = page.extract_text() or ""
 
-                # Picking Total List 요약 페이지는 그대로 통과 (수정 없음)
                 if "Packing No." not in text or "OrderNo." not in text:
-                    writer.add_page(page)
+                    fixed_pages.append((page_num, page))
                     continue
 
-                # 이 페이지에 SPECIAL_CODES가 있는지 확인
                 matched_codes = [code for code in SPECIAL_CODES if code in text]
-                if not matched_codes:
-                    writer.add_page(page)
-                    continue
+                words = plumber_page.extract_words()
+
+                # 이 페이지의 OrderNo 값 추출 (정렬 기준용)
+                page_order_no = None
+                order_match = re.search(r'OrderNo\.\s*(\S+)', text)
+                if order_match:
+                    page_order_no = order_match.group(1)
+
+                fedex_lines = []
+                for w in words:
+                    if w['text'] != 'OrderNo.':
+                        continue
+                    line_top = w['top']
+                    line_words = sorted(
+                        [lw for lw in words if abs(lw['top'] - line_top) < 2],
+                        key=lambda lw: lw['x0']
+                    )
+                    try:
+                        pos = next(i for i, lw in enumerate(line_words) if lw['text'] == 'OrderNo.')
+                    except StopIteration:
+                        continue
+                    if pos + 1 >= len(line_words):
+                        continue
+                    order_value_word = line_words[pos + 1]
+                    order_no = order_value_word['text']
+
+                    if not is_fedex_order(order_no):
+                        continue
+
+                    userid_word = next((lw for lw in line_words if lw['text'] == 'UserID.'), None)
+                    x_start = order_value_word['x1']
+                    x_end = userid_word['x0'] if userid_word else x_start + 80
+                    fedex_lines.append((line_top, x_start, x_end))
 
                 page_width = float(page.mediabox.width)
                 page_height = float(page.mediabox.height)
 
-                # pdfplumber 좌표계: top-left 기준 (y가 위에서 아래로 증가)
-                # reportlab 좌표계: bottom-left 기준 (y가 아래에서 위로 증가)
-                # 따라서 reportlab_y = page_height - plumber_y
+                if matched_codes or fedex_lines:
+                    overlay_buf = io.BytesIO()
+                    c = rl_canvas.Canvas(overlay_buf, pagesize=(page_width, page_height))
+                    drawn_lines = set()
 
-                words = plumber_page.extract_words()
+                    for code in matched_codes:
+                        for w in words:
+                            if w['text'] == code:
+                                top = w['top']
+                                line_key = round(top, 1)
+                                if line_key in drawn_lines:
+                                    continue
+                                drawn_lines.add(line_key)
 
-                overlay_buf = io.BytesIO()
-                c = rl_canvas.Canvas(overlay_buf, pagesize=(page_width, page_height))
+                                line_words = [lw for lw in words if abs(lw['top'] - top) < 2]
+                                if not line_words:
+                                    continue
 
-                drawn_lines = set()  # 같은 줄(top 좌표) 중복 박스 방지
+                                x0 = min(lw['x0'] for lw in line_words) - 4
+                                x1 = max(lw['x1'] for lw in line_words) + 4
+                                line_top = min(lw['top'] for lw in line_words)
+                                line_bottom = max(lw['bottom'] for lw in line_words)
 
-                for code in matched_codes:
-                    # 코드 문자열과 정확히 일치하는 단어를 찾음
-                    for w in words:
-                        if w['text'] == code:
-                            top = w['top']
-                            line_key = round(top, 1)
-                            if line_key in drawn_lines:
-                                continue
-                            drawn_lines.add(line_key)
+                                box_y0 = page_height - line_bottom - 2
+                                box_y1 = page_height - line_top + 2
+                                box_height = box_y1 - box_y0
 
-                            # 해당 줄(top 기준 ±2pt)에 속한 모든 단어를 모아 줄 전체 폭 계산
-                            line_words = [
-                                lw for lw in words
-                                if abs(lw['top'] - top) < 2
-                            ]
-                            if not line_words:
-                                continue
+                                c.setFillColorRGB(1, 0.84, 0, alpha=0.35)
+                                c.setStrokeColor(border_color)
+                                c.setLineWidth(1)
+                                c.rect(x0, box_y0, x1 - x0 + 20, box_height,
+                                       fill=1, stroke=1)
 
-                            x0 = min(lw['x0'] for lw in line_words) - 4
-                            x1 = max(lw['x1'] for lw in line_words) + 4
-                            line_top = min(lw['top'] for lw in line_words)
-                            line_bottom = max(lw['bottom'] for lw in line_words)
+                                c.setFillColor(star_color)
+                                c.setFont("Helvetica-Bold", 11)
+                                c.drawString(max(x0 - 18, 2), box_y0 + 2, "★")
 
-                            box_y0 = page_height - line_bottom - 2
-                            box_y1 = page_height - line_top + 2
-                            box_height = box_y1 - box_y0
+                    for line_top, x_start, x_end in fedex_lines:
+                        mid_x = (x_start + x_end) / 2
+                        font_size = 15
+                        y_offset = 17
+                        y = page_height - line_top - y_offset
+                        c.setFillColor(fedex_color)
+                        c.setFont("Helvetica-Bold", font_size)
+                        text_width = c.stringWidth("FEDEX", "Helvetica-Bold", font_size)
+                        c.drawString(mid_x - text_width / 2, y, "FEDEX")
 
-                            # 하이라이트 박스
-                            c.setFillColorRGB(1, 0.84, 0, alpha=0.35)
-                            c.setStrokeColor(border_color)
-                            c.setLineWidth(1)
-                            c.rect(x0, box_y0, x1 - x0 + 20, box_height,
-                                   fill=1, stroke=1)
+                    c.save()
+                    overlay_buf.seek(0)
+                    overlay_reader = PdfReader(overlay_buf)
+                    overlay_page = overlay_reader.pages[0]
+                    page.merge_page(overlay_page)
 
-                            # 별표 표시 (박스 왼쪽 바깥)
-                            c.setFillColor(star_color)
-                            c.setFont("Helvetica-Bold", 11)
-                            c.drawString(max(x0 - 18, 2), box_y0 + 2, "★")
+                # 정렬 순서 결정: tracking_data의 Category 우선, 없으면 FedEx 판정으로 추정
+                category = category_map.get(page_order_no)
+                if category is None:
+                    category = 'normal-fedex' if fedex_lines else 'normal-dhl'
+                order = CATEGORY_ORDER_BY_LABEL.get(category, 99)
 
-                c.save()
-                overlay_buf.seek(0)
+                order_pages.append((order, page_num, page))
 
-                overlay_reader = PdfReader(overlay_buf)
-                overlay_page = overlay_reader.pages[0]
-                page.merge_page(overlay_page)
-                writer.add_page(page)
+        # 카테고리 순서로 정렬 (같은 카테고리 내에서는 원래 순서 유지 - stable sort)
+        order_pages.sort(key=lambda t: (t[0], t[1]))
+
+        # 요약 페이지는 그대로, 개별 오더 페이지는 정렬된 순서로
+        for _, page in fixed_pages:
+            writer.add_page(page)
+        for _, _, page in order_pages:
+            writer.add_page(page)
 
         output = io.BytesIO()
         writer.write(output)
@@ -731,5 +956,6 @@ def highlight_picking_list():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=False, port=5000)
