@@ -172,6 +172,8 @@ def extract_single_pdf(file_content, filename, manual_ref=None):
         num_pages = len(r.pages)
         page_idx = 0
 
+        master_tracking = decode_top_barcode(file_content, 0)
+
         while page_idx < num_pages:
             try:
                 page = r.pages[page_idx]
@@ -230,10 +232,9 @@ def extract_single_pdf(file_content, filename, manual_ref=None):
                 elif filename_ref:
                     ref_raw = filename_ref
 
-                # 바코드가 텍스트보다 항상 정확 - 찾았으면 무조건(자르지 않고) 덮어씀
-                bc_digits = decode_top_barcode(file_content, page_idx)
-                if bc_digits:
-                    tracking_no = bc_digits
+                # 바코드는 첫 페이지에서 이미 스캔한 값을 그대로 사용 (페이지마다 다시 스캔하지 않음)
+                if master_tracking:
+                    tracking_no = master_tracking
 
                 piece_total = None
                 piece_style = None  # 'slash' = DHL(1/13), 'of' = FedEx MPS(1 of 2)
