@@ -813,6 +813,11 @@ def highlight_picking_list():
 
         FEDEX_TRACKING_MIN_LEN = 15
 
+        def normalize_order_no(s):
+            if not s:
+                return None
+            return re.sub(r'^RMA-?', '', s.strip(), flags=re.IGNORECASE)
+
         def is_fedex_order(order_no):
             track = tracking_map.get(order_no, "")
             digits = re.sub(r'\D', '', track)
@@ -843,11 +848,16 @@ def highlight_picking_list():
                 matched_codes = [code for code in SPECIAL_CODES if code in text]
                 words = plumber_page.extract_words()
 
-                # 이 페이지의 OrderNo 값 추출 (정렬 기준용)
                 page_order_no = None
+                page_user_id = None
+
                 order_match = re.search(r'OrderNo\.\s*(\S+)', text)
                 if order_match:
                     page_order_no = order_match.group(1)
+
+                userid_match = re.search(r'UserID\.\s*(\S+)', text)
+                if userid_match:
+                    page_user_id = userid_match.group(1)
 
                 fedex_lines = []
                 for w in words:
@@ -932,9 +942,58 @@ def highlight_picking_list():
                     page.merge_page(overlay_page)
 
                 # 정렬 순서 결정: tracking_data의 Category 우선, 없으면 FedEx 판정으로 추정
-                category = category_map.get(page_order_no)
+                category = category_map.get(normalize_order_no(page_order_no))
                 if category is None:
                     category = 'normal-fedex' if fedex_lines else 'normal-dhl'
+                order = CATEGORY_ORDER_BY_LABEL.get(category, 99)
+
+
+
+
+                # ---------------------------------------------------------
+                # Category 결정
+                # ---------------------------------------------------------
+
+                # UserID로 RMA / Normal 판단
+                user_id_upper = (page_user_id or "").strip().upper()
+
+                if "RMA" in user_id_upper:
+                    is_rma = True
+                elif "FRA" in user_id_upper:
+                    is_rma = False
+                else:
+                    # 혹시 UserID를 못 읽은 경우 기존 tracking_data의 Category 사용
+                    existing_category = category_map.get(
+                        normalize_order_no(page_order_no)
+                    )
+
+                    if existing_category:
+                        is_rma = existing_category.startswith("rma-")
+                    else:
+                        is_rma = False
+
+
+                # DHL / FedEx 판단
+                if fedex_lines:
+                    carrier = "fedex"
+                else:
+                    # tracking_data에 있는 Tracking Number를 fallback으로 사용
+                    track = tracking_map.get(
+                        normalize_order_no(page_order_no),
+                        ""
+                    )
+
+                    digits = re.sub(r'\D', '', track)
+
+                    if len(digits) >= FEDEX_TRACKING_MIN_LEN:
+                        carrier = "fedex"
+                    else:
+                        carrier = "dhl"
+
+
+                # 최종 Category
+                category = category_label(carrier, is_rma)
+
                 order = CATEGORY_ORDER_BY_LABEL.get(category, 99)
 
                 order_pages.append((order, page_num, page))
