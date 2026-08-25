@@ -15,6 +15,8 @@ from PIL import Image
 import zipfile
 import threading
 
+from reportlab.pdfgen import canvas as rl_canvas
+
 app = Flask(__name__)
 
 # Lock for thread-safe
@@ -83,7 +85,7 @@ def expand_ref_numbers(ref_str):
     return expanded
 
 def decode_top_barcode(pdf_bytes, page_idx, scale=3.0):
-    """숫자로만 이루어진 바코드를 찾아서 원본 그대로 반환 (포맷 무관, 자르지 않음)"""
+  
     try:
         with pdfium_lock:
             doc = pdfium.PdfDocument(BytesIO(pdf_bytes))
@@ -151,8 +153,51 @@ def is_valid_label_page(page, is_last_page=False, pdf_bytes=None, page_idx=None)
 
     return True
 
+
+def extract_order_no_from_filename(filename):
+
+    stem = os.path.splitext(
+        os.path.basename(filename)
+    )[0]
+
+    # RMA 접두사 제거
+    stem = re.sub(
+        r'^RMA-?',
+        '',
+        stem,
+        flags=re.IGNORECASE
+    )
+
+    # 숫자와 하이픈 이외의 문자는 구분자로 변경
+    candidate = re.sub(
+        r'[^0-9\-]+',
+        ';',
+        stem
+    ).strip(';')
+
+    if not candidate:
+        return None
+
+    first_part = candidate.split(';')[0]
+
+    # SAP Order No는 400으로 시작
+    if (
+        first_part.startswith('400')
+        and len(first_part) >= 7
+    ):
+        return candidate
+
+    return None
+
+
+
 def extract_single_pdf(file_content, filename, manual_ref=None):
     stream = BytesIO(file_content)
+
+    order_no = None
+    tracking_no = None
+    total_pages = 0
+
     results = []
 
     is_rma_file = bool(re.search(r'RMA', filename, re.IGNORECASE))
@@ -502,54 +547,469 @@ def download_excel():
     output.seek(0)
     return send_file(output, as_attachment=True, download_name="extraction_results.xlsx")
 
+
 @app.route('/print_filter', methods=['POST'])
 def print_filter():
     files = request.files.getlist('files')
     target_size = request.form.get('target_size')
-    file_data = [(f.read(), f.filename) for f in files if f.filename.endswith('.pdf')]
+
+    file_data = [
+        (f.read(), f.filename)
+        for f in files
+        if f.filename.lower().endswith('.pdf')
+    ]
+
     writer = PdfWriter()
 
+    # ==========================================================
+    # PDF 사이즈 확인
+    # ==========================================================
     def check_size_worker(data_pair):
         data, name = data_pair
         return get_pdf_size(BytesIO(data)) == target_size, data
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        check_results = list(executor.map(check_size_worker, file_data))
+        check_results = list(
+            executor.map(
+                check_size_worker,
+                file_data
+            )
+        )
 
-    # (order, is_rma, carrier, pages_to_add) 튜플로 모아서 나중에 정렬
+    # (order, pages_to_add)
     grouped = []
-    for (is_target, data), (_, name) in zip(check_results, file_data):
+
+    # ==========================================================
+    # 파일 처리
+    # ==========================================================
+    for (is_target, data), (_, name) in zip(
+        check_results,
+        file_data
+    ):
+
         if not is_target:
             continue
-        is_rma_file = bool(re.search(r'RMA', name, re.IGNORECASE))
-        reader = PdfReader(BytesIO(data))
-        total = len(reader.pages)
-        pages_to_add = []
-        carrier_text = ""
-        for idx, page in enumerate(reader.pages):
-            is_last = (idx == total - 1)
-            if is_valid_label_page(page, is_last_page=is_last, pdf_bytes=data, page_idx=idx):
-                pages_to_add.append(page)
-                carrier_text += (page.extract_text() or "") + " "
-        if not pages_to_add:
+
+        # ======================================================
+        # RMA 여부
+        # ======================================================
+        is_rma_file = bool(
+            re.search(
+                r'RMA',
+                name,
+                re.IGNORECASE
+            )
+        )
+
+        try:
+
+            reader = PdfReader(
+                BytesIO(data)
+            )
+
+            total = len(reader.pages)
+
+            if total == 0:
+                continue
+
+            first_page = reader.pages[0]
+
+            first_text = (
+                first_page.extract_text()
+                or ""
+            )
+
+            # ==================================================
+            # 텍스트가 없는 벡터 라벨(DHL a4 / FedEx 둘 다 해당)이면
+            # OCR 대신 바코드를 디코딩해서 그 텍스트를 분석 대상으로 사용
+            #
+            # FedEx의 PDF417 바코드 안에는 "1/2", "1/1" 같은 피스 정보가
+            # 사람이 읽는 라벨과 동일한 형식으로 그대로 들어있음
+            # ==================================================
+
+            barcode_results = []
+            analysis_text = first_text
+
+            if not first_text.strip():
+
+                try:
+
+                    with pdfium_lock:
+                        doc = pdfium.PdfDocument(BytesIO(data))
+                        page0 = doc[0]
+                        bitmap = page0.render(scale=3.0)  # 바코드는 회전 불필요
+                        pil_img = bitmap.to_pil()
+                        doc.close()
+
+                    barcode_results = zxingcpp.read_barcodes(pil_img)
+
+                    analysis_text = " ".join(
+                        r.text for r in barcode_results
+                    )
+
+                except Exception as bc_err:
+
+                    print(
+                        f"[PRINT FILTER] "
+                        f"Barcode fallback failed for {name}: {bc_err}"
+                    )
+
+            # ==================================================
+            # FedEx / DHL 판단
+            # ==================================================
+            is_master_fedex = bool(
+                re.search(
+                    r'##\s*MASTER\s*##',
+                    analysis_text,
+                    re.IGNORECASE
+                )
+            )
+
+            # ----------------------------------------------
+            # FedEx 여러 장 표시 (사람이 읽는 텍스트 기준)
+            #
+            # 1 of 2
+            # 1 of 3
+            # ----------------------------------------------
+            fedex_piece_match = re.search(
+                r'\b1\s+of\s+(\d+)\b',
+                analysis_text,
+                re.IGNORECASE
+            )
+
+            # ----------------------------------------------
+            # FedEx 바코드 형식 판단 (PDF417 = FedEx, DHL은 안 씀)
+            # 텍스트 없는 벡터 라벨에서 "## MASTER ##" 등이
+            # 바코드 payload엔 없으므로 이걸로 보강
+            # ----------------------------------------------
+            has_pdf417 = any(
+                str(r.format) == "PDF417"
+                for r in barcode_results
+            )
+
+            # ----------------------------------------------
+            # FedEx PDF417 payload 안의 "N/M" 피스 정보
+            # (사람이 읽는 "1 of 2"와 동일 정보, 바코드 폴백 시에만 사용)
+            # ----------------------------------------------
+            fedex_barcode_piece_match = None
+            if barcode_results:
+                fedex_barcode_piece_match = re.search(
+                    r'\b(\d+)/(\d+)\b',
+                    analysis_text
+                )
+
+            # ----------------------------------------------
+            # FedEx 고유 문구
+            #
+            # 1장짜리 FedEx는
+            # MASTER / 1 of N이 없을 수 있으므로
+            # FEDEX / TRK# / MPS#도 확인
+            # ----------------------------------------------
+            is_fedex_text = bool(
+                re.search(
+                    r'FEDEX|TRK#|MPS#',
+                    analysis_text,
+                    re.IGNORECASE
+                )
+            )
+
+            # ----------------------------------------------
+            # 최종 FedEx 판단
+            #
+            # MASTER + 1 of N
+            # 또는 FedEx 고유 문구
+            # 또는 (바코드 폴백일 때) PDF417 바코드 존재
+            # ----------------------------------------------
+            is_fedex = (
+                (
+                    is_master_fedex
+                    and fedex_piece_match is not None
+                )
+                or is_fedex_text
+                or (bool(barcode_results) and has_pdf417)
+            )
+
+
+
+            # ==================================================
+            # FedEx REF
+            #
+            # 중요:
+            # REF는 FedEx일 때만 찾음
+            # 그리고 PDF 내용이 아니라 파일명에서만 찾음
+            # ==================================================
+
+            ref_no = None
+
+            if is_fedex:
+
+                filename_base = os.path.splitext(
+                    name
+                )[0]
+
+                file_ref_match = re.search(
+                    r'(?<!\d)(400\d{7})(?!\d)',
+                    filename_base
+                )
+
+                if file_ref_match:
+
+                    ref_no = file_ref_match.group(1)
+
+            # ==================================================
+            # DEBUG
+            # ==================================================
+
+            fedex_pages_debug = (
+                fedex_piece_match.group(1)
+                if fedex_piece_match
+                else None
+            )
+
+            print(
+                f"[PRINT FILTER] {name} | "
+                f"FedEx={is_fedex} | "
+                f"MASTER={is_master_fedex} | "
+                f"FedExPages={fedex_pages_debug} | "
+                f"REF={ref_no}"
+            )
+
+            print(
+                f"[ANALYSIS TEXT] {name} "
+                f"(source={'barcode' if barcode_results else 'pdf_text'})\n"
+                f"{analysis_text[:3000]}"
+            )
+
+            
+            # ==================================================
+            # 페이지 수 판단
+            # ==================================================
+
+            piece_total = None
+
+            # ==================================================
+            # FedEx
+            # ==================================================
+            if is_fedex:
+
+                # ------------------------------------------
+                # FedEx 여러 장
+                #
+                # 텍스트 있으면 "1 of 2", 바코드 폴백이면 PDF417의 "1/2"
+                # ------------------------------------------
+                if fedex_piece_match:
+
+                    piece_total = int(
+                        fedex_piece_match.group(1)
+                    )
+
+                elif fedex_barcode_piece_match:
+
+                    piece_total = int(
+                        fedex_barcode_piece_match.group(2)
+                    )
+
+                else:
+
+                    # --------------------------------------
+                    # FedEx 1장짜리
+                    #
+                    # 1 of N이 없으면 1장
+                    # --------------------------------------
+                    piece_total = 1
+
+            # DHL
+            else:
+
+                # DHL
+                dhl_piece_match = re.search(
+                    r'\b1\s*/\s*(\d+)\b',
+                    analysis_text
+                )
+
+                if dhl_piece_match:
+
+                    piece_total = int(
+                        dhl_piece_match.group(1)
+                    )
+
+                else:
+                    # DHL에서 페이지 수가 없으면
+                    # 기존 방식대로 전체 사용
+
+                    piece_total = None
+
+
+            # 실제 출력 페이지 결정
+            if piece_total is not None:
+
+                piece_total = min(
+                    piece_total,
+                    total
+                )
+
+                pages_to_add = reader.pages[
+                    :piece_total
+                ]
+
+            else:
+
+                pages_to_add = reader.pages[:]
+
+            if not pages_to_add:
+                continue
+
+            # FedEx REF 표시
+            if (
+                is_fedex
+                and ref_no
+                and target_size == 'label'
+            ):
+
+                try:
+
+                    # pages_to_add 전체(마스터 + 모든 조각)에
+                    # 동일한 오더 넘버를 반복해서 표시
+
+                    for page in pages_to_add:
+
+                        page_width = float(
+                            page.mediabox.width
+                        )
+
+                        page_height = float(
+                            page.mediabox.height
+                        )
+
+                        overlay_buf = BytesIO()
+
+                        c = rl_canvas.Canvas(
+                            overlay_buf,
+                            pagesize=(
+                                page_width,
+                                page_height
+                            )
+                        )
+
+                        c.setFillColorRGB(
+                            0,
+                            0,
+                            0
+                        )
+
+                        c.setFont(
+                            "Helvetica-Bold",
+                            14
+                        )
+
+                        ref_x = page_width - 120
+                        ref_y = page_height - 110
+
+                        c.drawString(
+                            ref_x,
+                            ref_y,
+                            ref_no
+                        )
+
+                        c.save()
+
+                        overlay_buf.seek(0)
+
+                        overlay_reader = PdfReader(
+                            overlay_buf
+                        )
+
+                        page.merge_page(
+                            overlay_reader.pages[0]
+                        )
+
+                    print(
+                        f"[PRINT FILTER] "
+                        f"FedEx REF added to {len(pages_to_add)} page(s): "
+                        f"{name} -> {ref_no}"
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"[PRINT FILTER] "
+                        f"REF overlay error "
+                        f"{name}: {e}"
+                    )
+
+            # 카테고리 정렬
+
+            carrier = (
+                "fedex"
+                if is_fedex
+                else "dhl"
+            )
+
+            order = CATEGORY_ORDER.get(
+                (
+                    carrier,
+                    is_rma_file
+                ),
+                99
+            )
+
+            grouped.append(
+                (
+                    order,
+                    pages_to_add
+                )
+            )
+
+        except Exception as e:
+
+            print(
+                f"[PRINT FILTER] "
+                f"Error processing {name}: {e}"
+            )
+
             continue
-        carrier = classify_carrier(carrier_text)
-        order = CATEGORY_ORDER.get((carrier, is_rma_file), 99)
-        grouped.append((order, pages_to_add))
+
+
+    # 출력할 파일이 없는 경우
 
     if not grouped:
-        return jsonify({"error": f"인쇄 가능한 {target_size} 규격의 페이지가 없습니다."}), 404
 
-    # normal-dhl -> normal-fedex -> rma-dhl -> rma-fedex 순으로 정렬해서 병합
-    grouped.sort(key=lambda g: g[0])
+        return jsonify({
+            "error": (
+                f"인쇄 가능한 "
+                f"{target_size} 규격의 "
+                f"페이지가 없습니다."
+            )
+        }), 404
+
+    # 인쇄 순서
+    # normal-dhl -> normal-fedex -> rma-dhl -> rma-fedex
+
+    grouped.sort(
+        key=lambda g: g[0]
+    )
+
+    # 페이지 추가
     for _, pages_to_add in grouped:
+
         for page in pages_to_add:
+
             writer.add_page(page)
 
+
+    # PDF 생성
     output = BytesIO()
+
     writer.write(output)
+
     output.seek(0)
-    return send_file(output, mimetype='application/pdf')
+
+    return send_file(
+        output,
+        mimetype='application/pdf'
+    )
+
+
 
 SPECIAL_CODES = ['3A0113417C0', '3A0112485C0', '3A0113147C0', '3A0113418C0', '3A0113419C0', '3A0112340C0', '6A0111588C0', '5M0111852W0', '5M0112350E0', '3A0113412C0', '3A0113411C0', '3A0111853C0']
 
@@ -1018,4 +1478,4 @@ def highlight_picking_list():
 
 
 if __name__ == '__main__':
-    app.run(debug=False, port=5000)
+    app.run(debug=True, port=5000)
