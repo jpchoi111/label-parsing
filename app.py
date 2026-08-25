@@ -8,8 +8,6 @@ from flask import Flask, render_template, request, send_file, jsonify
 from io import BytesIO
 import tempfile
 import pypdfium2 as pdfium
-import easyocr
-import numpy as np
 import zxingcpp
 from PIL import Image
 import zipfile
@@ -20,7 +18,6 @@ from reportlab.pdfgen import canvas as rl_canvas
 app = Flask(__name__)
 
 # Lock for thread-safe
-ocr_lock = threading.Lock()
 pdfium_lock = threading.Lock() 
 
 # Helper to extract images from template if they don't exist
@@ -43,9 +40,6 @@ def ensure_images_extracted():
                     pass
 
 ensure_images_extracted()
-
-# Initialize EasyOCR Reader once
-reader = easyocr.Reader(['en'])
 
 MAX_WORKERS = os.cpu_count() or 4
 
@@ -84,25 +78,80 @@ def expand_ref_numbers(ref_str):
                 expanded.append(digits_only)
     return expanded
 
-def decode_top_barcode(pdf_bytes, page_idx, scale=3.0):
-  
+def decode_top_barcode(pdf_bytes, scale=3.0):
+
+    rotations = [0, 90]
+
+    tracking_candidates = []
+    barcode_pages = None
+
     try:
-        with pdfium_lock:
-            doc = pdfium.PdfDocument(BytesIO(pdf_bytes))
-            page = doc[page_idx]
-            bitmap = page.render(scale=scale)
-            img = bitmap.to_pil()
-            doc.close()
+        for rotation in rotations:
 
-        results = zxingcpp.read_barcodes(img)
-        candidates = [r.text for r in results if r.text.isdigit() and len(r.text) >= 10]
-        if candidates:
-            # 가장 긴 값이 원본 스캔값에 가장 가까움 (DHL은 Code39 10자리, FedEx는 Code128 34자리 모두 커버)
-            return max(candidates, key=len)
-    except Exception:
-        pass
-    return None
+            with pdfium_lock:
+                doc = pdfium.PdfDocument(
+                    BytesIO(pdf_bytes)
+                )
 
+                page = doc[0]
+
+                bitmap = page.render(
+                    scale=scale,
+                    rotation=rotation
+                )
+
+                img = bitmap.to_pil()
+
+                doc.close()
+
+            results = zxingcpp.read_barcodes(img)
+
+            for result in results:
+                text = result.text or ""
+
+                if (
+                    text.isdigit()
+                    and len(text) >= 10
+                ):
+                    tracking_candidates.append(text)
+
+                page_match = re.search(
+                    r'\b\d+\s*/\s*(\d+)\b',
+                    text
+                )
+
+                if not page_match:
+                    page_match = re.search(
+                        r'\b\d+\s+of\s+(\d+)\b',
+                        text,
+                        re.IGNORECASE
+                    )
+
+                if page_match:
+                    barcode_pages = int(
+                        page_match.group(1)
+                    )
+
+
+            if tracking_candidates and barcode_pages:
+                break
+
+        tracking_no = None
+
+        if tracking_candidates:
+            tracking_no = max(
+                tracking_candidates,
+                key=len
+            )
+
+        return tracking_no, barcode_pages
+
+    except Exception as e:
+        print(
+            f"Barcode decode error: {e}"
+        )
+
+        return None, None
 
 def classify_carrier(text):
     """라벨 텍스트로 DHL/FedEx 구분"""
@@ -122,36 +171,67 @@ CATEGORY_ORDER = {
 def category_label(carrier, is_rma):
     return ('rma-' if is_rma else 'normal-') + carrier
 
-def is_valid_label_page(page, is_last_page=False, pdf_bytes=None, page_idx=None):
-    text = page.extract_text()
-    exclude_keywords = ["waybill doc", "receipt", "archive doc", "copy for your records", "carriage value", "customs value"]
+def decode_all_page_barcodes(pdf_bytes, total_pages, scale=3.0):
 
-    if text and text.strip():
-        text_lower = text.lower()
-        for kw in exclude_keywords:
-            if kw in text_lower:
-                return False
-        return True
+    page_results = []
 
-    # 텍스트 없는 페이지는 보통 벡터 라벨이라 그대로 통과.
-    # 단, 파일의 "마지막 페이지"는 Shipment Receipt(역시 텍스트 없는 벡터형)일 가능성이 높으니
-    # 이 경우에만 OCR로 한 번 확인 (전체 페이지에 OCR 걸지 않음 = 속도 유지)
-    if is_last_page and pdf_bytes is not None and page_idx is not None:
-        try:
+    try:
+        with pdfium_lock:
             doc = pdfium.PdfDocument(BytesIO(pdf_bytes))
-            p = doc[page_idx]
-            bitmap = p.render(scale=1.5, rotation=0)
-            with ocr_lock:
-                ocr_text = " ".join(reader.readtext(np.array(bitmap.to_pil()), detail=0))
-            doc.close()
-            ocr_lower = ocr_text.lower()
-            for kw in exclude_keywords:
-                if kw in ocr_lower:
-                    return False
-        except Exception:
-            pass
 
-    return True
+            for page_idx in range(total_pages):
+                try:
+                    page = doc[page_idx]
+
+                    bitmap = page.render(
+                        scale=scale,
+                        rotation=0
+                    )
+
+                    img = bitmap.to_pil()
+
+                    results = zxingcpp.read_barcodes(img)
+
+                    for result in results:
+                        text = result.text or ""
+
+                        # FedEx: 1/2
+                        match = re.search(
+                            r'\b(\d+)\s*/\s*(\d+)\b',
+                            text
+                        )
+
+                        # FedEx: 1 of 2
+                        if not match:
+                            match = re.search(
+                                r'\b(\d+)\s+of\s+(\d+)\b',
+                                text,
+                                re.IGNORECASE
+                            )
+
+                        if match:
+                            page_results.append({
+                                "page_idx": page_idx,
+                                "piece_no": int(match.group(1)),
+                                "total": int(match.group(2))
+                            })
+
+                            break
+
+                except Exception as e:
+                    print(
+                        f"Barcode scan failed "
+                        f"(page={page_idx}): {e}"
+                    )
+
+            doc.close()
+
+    except Exception as e:
+        print(
+            f"Full PDF barcode scan error: {e}"
+        )
+
+    return page_results
 
 
 def extract_order_no_from_filename(filename):
@@ -189,186 +269,78 @@ def extract_order_no_from_filename(filename):
 
     return None
 
-
-
 def extract_single_pdf(file_content, filename, manual_ref=None):
-    stream = BytesIO(file_content)
-
-    order_no = None
-    tracking_no = None
-    total_pages = 0
-
-    results = []
-
-    is_rma_file = bool(re.search(r'RMA', filename, re.IGNORECASE))
-
-    filename_ref = None
-    if not manual_ref:
-        stem = os.path.splitext(os.path.basename(filename))[0]
-        stem = re.sub(r'^RMA-?', '', stem, flags=re.IGNORECASE)
-        candidate = re.sub(r'[^0-9\-]+', ';', stem).strip(';')
-        first_part = candidate.split(';')[0]
-        if first_part.startswith('400') and len(first_part) >= 7:
-            filename_ref = candidate
-
+ 
     try:
+        # PDF 전체 페이지 수
+        stream = BytesIO(file_content)
         r = PdfReader(stream)
-        seen_waybills = set()
-        num_pages = len(r.pages)
-        page_idx = 0
+        total_pages = len(r.pages)
 
-        master_tracking = decode_top_barcode(file_content, 0)
+        if total_pages == 0:
+            return {
+                "order_no": "Not Found",
+                "tracking_no": "Not Found",
+                "size": "error",
+                "total_pages": 0,
+                "barcode_pages": None
+            }
 
-        while page_idx < num_pages:
-            try:
-                page = r.pages[page_idx]
-                full_text = page.extract_text() or ""
+        # --------------------------------------------------
+        # Order No
+        # --------------------------------------------------
+        if manual_ref:
+            order_no = manual_ref
+        else:
+            stem = os.path.splitext(
+                os.path.basename(filename)
+            )[0]
 
-                _text_lower = full_text.lower()
-                _skip_keywords = [
-                    "shipment receipt", "waybill doc", "receipt", "archive doc",
-                    "copy for your records", "carriage value", "customs value"
-                ]
-                if any(kw in _text_lower for kw in _skip_keywords):
-                    page_idx += 1
-                    continue
+            stem = re.sub(
+                r'^RMA-?',
+                '',
+                stem,
+                flags=re.IGNORECASE
+            )
 
-                w, h = float(page.mediabox.width), float(page.mediabox.height)
-                size = "a4" if (w > 600 or h > 600) else "label"
+            candidate = re.sub(
+                r'[^0-9\-]+',
+                ';',
+                stem
+            ).strip(';')
 
-                def find_data(text):
-                    normalized = " ".join(text.split())
-                    ref_res = "Not Found"
-                    ref_line = re.search(r'Ref\s*(?:No)?[:\s]+([\d][0-9;\-,\s]{5,80})', text, re.IGNORECASE)
-                    if ref_line:
-                        candidate = ref_line.group(1).strip()
-                        candidate = re.split(r'[^\d;\-,\s]', candidate)[0].strip()
-                        if len(re.sub(r'\D', '', candidate)) >= 7:
-                            ref_res = candidate
-                    if ref_res == "Not Found" or len(re.sub(r'\D', '', ref_res)) < 7:
-                        all_sap = re.findall(r'\b(400\d{7})\b', normalized)
-                        if all_sap:
-                            ref_res = "; ".join(sorted(list(set(all_sap))))
+            order_no = candidate or "Not Found"
 
-                    track_res = "Not Found"
-                    waybill_patterns = [
-                        r'(?:WA)?YBILL\s*[:\s]*([\d\s]{10,25})',
-                        r'\b([71]\d[\d\s]{8,15}\d)\b',
-                        r'\b([71]\d{9})\b',
-                        r'\b(18\d{8})\b',
-                        r'\b(\d{4}\s\d{4}\s\d{4})\b'
-                    ]
-                    for pattern in waybill_patterns:
-                        match = re.search(pattern, normalized, re.IGNORECASE)
-                        if match:
-                            val = match.group(1 if "(" in pattern else 0)
-                            digits = re.sub(r'\D', '', val)
-                            if len(digits) >= 10:
-                                temp_track = digits
-                                if temp_track not in ref_res:
-                                    track_res = temp_track
-                                    break
-                    return ref_res, track_res
+        # --------------------------------------------------
+        # PDF Size
+        # --------------------------------------------------
+        size = get_pdf_size(BytesIO(file_content))
 
-                ref_raw, tracking_no = find_data(full_text)
+        # --------------------------------------------------
+        # 첫 페이지 바코드
+        # --------------------------------------------------
+        tracking_no, barcode_pages = decode_top_barcode(
+            file_content
+        )
 
-                if manual_ref:
-                    ref_raw = manual_ref
-                elif filename_ref:
-                    ref_raw = filename_ref
-
-                # 바코드는 첫 페이지에서 이미 스캔한 값을 그대로 사용 (페이지마다 다시 스캔하지 않음)
-                if master_tracking:
-                    tracking_no = master_tracking
-
-                piece_total = None
-                piece_style = None  # 'slash' = DHL(1/13), 'of' = FedEx MPS(1 of 2)
-                piece_match = re.search(r'\b(\d+)/(\d+)\b', full_text)
-                if piece_match:
-                    piece_total = int(piece_match.group(2))
-                    piece_style = 'slash'
-                else:
-                    of_match = re.search(r'\b(\d+)\s+of\s+(\d+)\b', full_text, re.IGNORECASE)
-                    if of_match:
-                        piece_total = int(of_match.group(2))
-                        piece_style = 'of'
-
-                carrier_text = full_text
-
-                need_ocr = (tracking_no == "Not Found") or (ref_raw == "Not Found" and not filename_ref)
-                if need_ocr:
-                    stream.seek(0)
-                    with pdfium_lock:
-                        doc = pdfium.PdfDocument(stream)
-                        plumb_page = doc[page_idx]
-                        rots = [90] if size == "a4" else [90, 0]
-                        rendered = []
-                        for rot in rots:
-                            bitmap = plumb_page.render(scale=2.0, rotation=rot)
-                            rendered.append(bitmap.to_pil())
-                        doc.close()
-
-                    page_text = ""
-                    for rot, pil_img in zip(rots, rendered):
-                        with ocr_lock:
-                            ocr_result = reader.readtext(np.array(pil_img), detail=0)
-                        page_text = " ".join(ocr_result)
-
-                        if any(kw in page_text.lower() for kw in _skip_keywords):
-                            page_text = ""
-                            break
-
-                        carrier_text += " " + page_text
-                        temp_ref, temp_track = find_data(page_text)
-                        if temp_ref != "Not Found" and ref_raw == "Not Found":
-                            ref_raw = temp_ref
-                        if temp_track != "Not Found" and tracking_no == "Not Found":
-                            tracking_no = temp_track
-                            break
-
-                    if piece_total is None and page_text:
-                        piece_match = re.search(r'\b(\d+)/(\d+)\b', page_text)
-                        if piece_match:
-                            piece_total = int(piece_match.group(2))
-                            piece_style = 'slash'
-
-                carrier = classify_carrier(carrier_text)
-
-                if tracking_no != "Not Found" and tracking_no != "Error":
-                    if tracking_no not in seen_waybills:
-                        seen_waybills.add(tracking_no)
-                        results.append((ref_raw, tracking_no, size, is_rma_file, carrier))
-                else:
-                    if ref_raw != "Not Found" and ref_raw != "Error":
-                        if not any(rr[0] == ref_raw for rr in results):
-                            results.append((ref_raw, tracking_no, size, is_rma_file, carrier))
-
-                if size == "a4" and piece_total and piece_total > 1 and piece_style == 'slash':
-                    for _ in range(piece_total - 1):
-                        results.append((ref_raw, tracking_no, size, is_rma_file, carrier))
-                    page_idx += piece_total
-                elif piece_total and piece_total > 1 and piece_style == 'of':
-                    page_idx += piece_total
-                else:
-                    page_idx += 1
-
-            except Exception as e:
-                print(f"Error on page {page_idx} of {filename}: {e}")
-                page_idx += 1
-                continue
+        return {
+            "order_no": order_no,
+            "tracking_no": tracking_no or "Not Found",
+            "size": size,
+            "total_pages": total_pages,
+            "barcode_pages": barcode_pages
+        }
 
     except Exception as e:
         print(f"Error processing {filename}: {e}")
-        if manual_ref:
-            results.append((manual_ref, "Error", "Unknown", False, "dhl"))
-        else:
-            results.append(("Error", "Error", "Unknown", False, "dhl"))
 
-    if not results:
-        return [("Not Found", "Not Found", "Unknown", False, "dhl")]
-    return results
-
-
+        return {
+            "order_no": manual_ref or "Not Found",
+            "tracking_no": "Error",
+            "size": "error",
+            "total_pages": 0,
+            "barcode_pages": None
+        }
 
 @app.route('/')
 def index():
@@ -400,27 +372,36 @@ def parse():
         file_data.append((content, f.filename, m_ref))
 
     results = []
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(extract_single_pdf, d[0], d[1], d[2]) for d in file_data]
+        futures = [
+            executor.submit(
+                extract_single_pdf,
+                d[0],
+                d[1],
+                d[2]
+            )
+            for d in file_data
+        ]
+
         for future in futures:
-            page_results = future.result()  # 이제 리스트
-            for ref_raw, track, size, is_rma, carrier in page_results:
-                expanded_refs = expand_ref_numbers(ref_raw)
-                for ref in expanded_refs:
-                    results.append({
-                        "Ref No": ref,
-                        "Tracking Number": track,
-                        "Size Type": size,
-                        "Category": category_label(carrier, is_rma),
-                        "_order": CATEGORY_ORDER.get((carrier, is_rma), 99)
-                    })
+            result = future.result()
+
+            expanded_orders = expand_ref_numbers(
+                result["order_no"]
+            )
+
+            for ref in expanded_orders:
+                results.append({
+                    "Ref No": ref,
+                    "Tracking Number": result["tracking_no"],
+                    "Size Type": result["size"],
+                    "Total Pages": result["total_pages"],
+                    "Barcode Pages": result["barcode_pages"]
+                })
+
             if job_id and job_id in progress_data:
                 progress_data[job_id]["current"] += 1
-
-    # normal-dhl -> normal-fedex -> rma-dhl -> rma-fedex 순으로 정렬
-    results.sort(key=lambda r: r["_order"])
-    for r in results:
-        del r["_order"]
 
     if job_id and job_id in progress_data:
         del progress_data[job_id]
@@ -561,9 +542,6 @@ def print_filter():
 
     writer = PdfWriter()
 
-    # ==========================================================
-    # PDF 사이즈 확인
-    # ==========================================================
     def check_size_worker(data_pair):
         data, name = data_pair
         return get_pdf_size(BytesIO(data)) == target_size, data
@@ -576,23 +554,15 @@ def print_filter():
             )
         )
 
-    # (order, pages_to_add)
     grouped = []
 
-    # ==========================================================
-    # 파일 처리
-    # ==========================================================
     for (is_target, data), (_, name) in zip(
         check_results,
         file_data
     ):
-
         if not is_target:
             continue
 
-        # ======================================================
-        # RMA 여부
-        # ======================================================
         is_rma_file = bool(
             re.search(
                 r'RMA',
@@ -602,11 +572,7 @@ def print_filter():
         )
 
         try:
-
-            reader = PdfReader(
-                BytesIO(data)
-            )
-
+            reader = PdfReader(BytesIO(data))
             total = len(reader.pages)
 
             if total == 0:
@@ -619,44 +585,35 @@ def print_filter():
                 or ""
             )
 
-            # ==================================================
-            # 텍스트가 없는 벡터 라벨(DHL a4 / FedEx 둘 다 해당)이면
-            # OCR 대신 바코드를 디코딩해서 그 텍스트를 분석 대상으로 사용
-            #
-            # FedEx의 PDF417 바코드 안에는 "1/2", "1/1" 같은 피스 정보가
-            # 사람이 읽는 라벨과 동일한 형식으로 그대로 들어있음
-            # ==================================================
-
             barcode_results = []
             analysis_text = first_text
 
             if not first_text.strip():
-
                 try:
-
                     with pdfium_lock:
                         doc = pdfium.PdfDocument(BytesIO(data))
                         page0 = doc[0]
-                        bitmap = page0.render(scale=3.0)  # 바코드는 회전 불필요
+                        bitmap = page0.render(scale=3.0)
                         pil_img = bitmap.to_pil()
                         doc.close()
 
-                    barcode_results = zxingcpp.read_barcodes(pil_img)
+                    barcode_results = zxingcpp.read_barcodes(
+                        pil_img
+                    )
 
                     analysis_text = " ".join(
-                        r.text for r in barcode_results
+                        r.text
+                        for r in barcode_results
                     )
 
                 except Exception as bc_err:
-
                     print(
                         f"[PRINT FILTER] "
-                        f"Barcode fallback failed for {name}: {bc_err}"
+                        f"Barcode fallback failed for {name}: "
+                        f"{bc_err}"
                     )
 
-            # ==================================================
             # FedEx / DHL 판단
-            # ==================================================
             is_master_fedex = bool(
                 re.search(
                     r'##\s*MASTER\s*##',
@@ -665,46 +622,25 @@ def print_filter():
                 )
             )
 
-            # ----------------------------------------------
-            # FedEx 여러 장 표시 (사람이 읽는 텍스트 기준)
-            #
-            # 1 of 2
-            # 1 of 3
-            # ----------------------------------------------
             fedex_piece_match = re.search(
                 r'\b1\s+of\s+(\d+)\b',
                 analysis_text,
                 re.IGNORECASE
             )
 
-            # ----------------------------------------------
-            # FedEx 바코드 형식 판단 (PDF417 = FedEx, DHL은 안 씀)
-            # 텍스트 없는 벡터 라벨에서 "## MASTER ##" 등이
-            # 바코드 payload엔 없으므로 이걸로 보강
-            # ----------------------------------------------
             has_pdf417 = any(
                 str(r.format) == "PDF417"
                 for r in barcode_results
             )
 
-            # ----------------------------------------------
-            # FedEx PDF417 payload 안의 "N/M" 피스 정보
-            # (사람이 읽는 "1 of 2"와 동일 정보, 바코드 폴백 시에만 사용)
-            # ----------------------------------------------
             fedex_barcode_piece_match = None
+
             if barcode_results:
                 fedex_barcode_piece_match = re.search(
-                    r'\b(\d+)/(\d+)\b',
+                    r'\b(\d+)\s*/\s*(\d+)\b',
                     analysis_text
                 )
 
-            # ----------------------------------------------
-            # FedEx 고유 문구
-            #
-            # 1장짜리 FedEx는
-            # MASTER / 1 of N이 없을 수 있으므로
-            # FEDEX / TRK# / MPS#도 확인
-            # ----------------------------------------------
             is_fedex_text = bool(
                 re.search(
                     r'FEDEX|TRK#|MPS#',
@@ -713,39 +649,23 @@ def print_filter():
                 )
             )
 
-            # ----------------------------------------------
-            # 최종 FedEx 판단
-            #
-            # MASTER + 1 of N
-            # 또는 FedEx 고유 문구
-            # 또는 (바코드 폴백일 때) PDF417 바코드 존재
-            # ----------------------------------------------
             is_fedex = (
                 (
                     is_master_fedex
                     and fedex_piece_match is not None
                 )
                 or is_fedex_text
-                or (bool(barcode_results) and has_pdf417)
+                or (
+                    bool(barcode_results)
+                    and has_pdf417
+                )
             )
 
-
-
-            # ==================================================
             # FedEx REF
-            #
-            # 중요:
-            # REF는 FedEx일 때만 찾음
-            # 그리고 PDF 내용이 아니라 파일명에서만 찾음
-            # ==================================================
-
             ref_no = None
 
             if is_fedex:
-
-                filename_base = os.path.splitext(
-                    name
-                )[0]
+                filename_base = os.path.splitext(name)[0]
 
                 file_ref_match = re.search(
                     r'(?<!\d)(400\d{7})(?!\d)',
@@ -753,12 +673,7 @@ def print_filter():
                 )
 
                 if file_ref_match:
-
                     ref_no = file_ref_match.group(1)
-
-            # ==================================================
-            # DEBUG
-            # ==================================================
 
             fedex_pages_debug = (
                 fedex_piece_match.group(1)
@@ -780,67 +695,37 @@ def print_filter():
                 f"{analysis_text[:3000]}"
             )
 
-            
-            # ==================================================
-            # 페이지 수 판단
-            # ==================================================
-
+            # 페이지 수
             piece_total = None
 
-            # ==================================================
-            # FedEx
-            # ==================================================
             if is_fedex:
 
-                # ------------------------------------------
-                # FedEx 여러 장
-                #
-                # 텍스트 있으면 "1 of 2", 바코드 폴백이면 PDF417의 "1/2"
-                # ------------------------------------------
                 if fedex_piece_match:
-
                     piece_total = int(
                         fedex_piece_match.group(1)
                     )
 
                 elif fedex_barcode_piece_match:
-
                     piece_total = int(
                         fedex_barcode_piece_match.group(2)
                     )
 
                 else:
-
-                    # --------------------------------------
-                    # FedEx 1장짜리
-                    #
-                    # 1 of N이 없으면 1장
-                    # --------------------------------------
                     piece_total = 1
 
-            # DHL
             else:
 
-                # DHL
                 dhl_piece_match = re.search(
                     r'\b1\s*/\s*(\d+)\b',
                     analysis_text
                 )
 
                 if dhl_piece_match:
-
                     piece_total = int(
                         dhl_piece_match.group(1)
                     )
 
-                else:
-                    # DHL에서 페이지 수가 없으면
-                    # 기존 방식대로 전체 사용
-
-                    piece_total = None
-
-
-            # 실제 출력 페이지 결정
+            # 기본 페이지 선택
             if piece_total is not None:
 
                 piece_total = min(
@@ -848,12 +733,150 @@ def print_filter():
                     total
                 )
 
-                pages_to_add = reader.pages[
-                    :piece_total
-                ]
+                # 정상적인 경우에는 기존 방식 그대로 사용
+                pages_to_add = reader.pages[:piece_total]
+
+                # PDF 전체 페이지 수와 바코드상의 페이지 수가
+                # 다른 경우에만 전체 페이지 barcode scan
+                if piece_total != total:
+
+                    print(
+                        f"[PRINT FILTER] "
+                        f"Page count mismatch: {name} | "
+                        f"PDF={total} | "
+                        f"Barcode={piece_total}"
+                    )
+
+                    page_pieces = []
+
+                    try:
+                        with pdfium_lock:
+                            doc = pdfium.PdfDocument(
+                                BytesIO(data)
+                            )
+
+                            for page_idx in range(total):
+
+                                try:
+                                    page = doc[page_idx]
+
+                                    bitmap = page.render(
+                                        scale=3.0,
+                                        rotation=0
+                                    )
+
+                                    pil_img = bitmap.to_pil()
+
+                                    page_barcodes = (
+                                        zxingcpp.read_barcodes(
+                                            pil_img
+                                        )
+                                    )
+
+                                    found_piece = None
+
+                                    for barcode in page_barcodes:
+
+                                        barcode_text = (
+                                            barcode.text or ""
+                                        )
+
+                                        match = re.search(
+                                            r'\b(\d+)\s*/\s*(\d+)\b',
+                                            barcode_text
+                                        )
+
+                                        if not match:
+                                            match = re.search(
+                                                r'\b(\d+)\s+of\s+(\d+)\b',
+                                                barcode_text,
+                                                re.IGNORECASE
+                                            )
+
+                                        if match:
+                                            found_piece = {
+                                                "page_idx": page_idx,
+                                                "piece_no": int(
+                                                    match.group(1)
+                                                ),
+                                                "total": int(
+                                                    match.group(2)
+                                                )
+                                            }
+                                            break
+
+                                    if found_piece:
+                                        if (
+                                            found_piece["total"]
+                                            == piece_total
+                                        ):
+                                            page_pieces.append(
+                                                found_piece
+                                            )
+
+                                except Exception as page_err:
+                                    print(
+                                        f"[PRINT FILTER] "
+                                        f"Page barcode error "
+                                        f"{name} "
+                                        f"(page={page_idx + 1}): "
+                                        f"{page_err}"
+                                    )
+
+                            doc.close()
+
+                    except Exception as scan_err:
+                        print(
+                            f"[PRINT FILTER] "
+                            f"Full barcode scan failed "
+                            f"for {name}: {scan_err}"
+                        )
+
+                    page_pieces.sort(
+                        key=lambda x: x["piece_no"]
+                    )
+
+                    # piece 번호가 실제로 모두 발견된 경우에만
+                    # 전체 스캔 결과를 사용
+                    piece_numbers = {
+                        item["piece_no"]
+                        for item in page_pieces
+                    }
+
+                    expected_piece_numbers = set(
+                        range(
+                            1,
+                            piece_total + 1
+                        )
+                    )
+
+                    if (
+                        piece_numbers
+                        == expected_piece_numbers
+                    ):
+                        pages_to_add = [
+                            reader.pages[
+                                item["page_idx"]
+                            ]
+                            for item in page_pieces
+                        ]
+
+                        print(
+                            f"[PRINT FILTER] "
+                            f"Selected pages for {name}: "
+                            f"{[item['page_idx'] + 1 for item in page_pieces]}"
+                        )
+
+                    else:
+                        print(
+                            f"[PRINT FILTER] "
+                            f"Could not identify all pieces "
+                            f"for {name}. "
+                            f"Found={sorted(piece_numbers)}, "
+                            f"Expected={sorted(expected_piece_numbers)}"
+                        )
 
             else:
-
                 pages_to_add = reader.pages[:]
 
             if not pages_to_add:
@@ -867,9 +890,6 @@ def print_filter():
             ):
 
                 try:
-
-                    # pages_to_add 전체(마스터 + 모든 조각)에
-                    # 동일한 오더 넘버를 반복해서 표시
 
                     for page in pages_to_add:
 
@@ -925,7 +945,8 @@ def print_filter():
 
                     print(
                         f"[PRINT FILTER] "
-                        f"FedEx REF added to {len(pages_to_add)} page(s): "
+                        f"FedEx REF added to "
+                        f"{len(pages_to_add)} page(s): "
                         f"{name} -> {ref_no}"
                     )
 
@@ -936,8 +957,6 @@ def print_filter():
                         f"REF overlay error "
                         f"{name}: {e}"
                     )
-
-            # 카테고리 정렬
 
             carrier = (
                 "fedex"
@@ -969,11 +988,7 @@ def print_filter():
 
             continue
 
-
-    # 출력할 파일이 없는 경우
-
     if not grouped:
-
         return jsonify({
             "error": (
                 f"인쇄 가능한 "
@@ -982,22 +997,14 @@ def print_filter():
             )
         }), 404
 
-    # 인쇄 순서
-    # normal-dhl -> normal-fedex -> rma-dhl -> rma-fedex
-
     grouped.sort(
         key=lambda g: g[0]
     )
 
-    # 페이지 추가
     for _, pages_to_add in grouped:
-
         for page in pages_to_add:
-
             writer.add_page(page)
 
-
-    # PDF 생성
     output = BytesIO()
 
     writer.write(output)
