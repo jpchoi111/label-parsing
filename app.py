@@ -641,7 +641,7 @@ def print_filter():
 
             is_fedex_text = bool(
                 re.search(
-                    r'FEDEX|TRK#|MPS#',
+                    r'FEDEX|TRK#|MPS#|\bFDE\b|\bFDX\b',
                     analysis_text,
                     re.IGNORECASE
                 )
