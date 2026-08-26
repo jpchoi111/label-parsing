@@ -232,6 +232,19 @@
     </div>
 
     <script>
+        // /medit 경로를 통해 API 요청
+        const API_BASE = '/medit';
+
+        const originalFetch = window.fetch;
+        window.fetch = function(url, options) {
+            if (typeof url === 'string' &&
+                url.startsWith('/') &&
+                !url.startsWith('/medit/')) {
+                url = API_BASE + url;
+            }
+            return originalFetch(url, options);
+        };
+
         let allFiles = []; 
         let currentAnalysisResults = [];  // 활성 항목
         let deletedResults = [];          // 삭제된 항목
