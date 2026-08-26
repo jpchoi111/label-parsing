@@ -12,7 +12,6 @@ import zxingcpp
 from PIL import Image
 import zipfile
 import threading
-
 from reportlab.pdfgen import canvas as rl_canvas
 
 app = Flask(__name__)
@@ -41,7 +40,7 @@ def ensure_images_extracted():
 
 ensure_images_extracted()
 
-MAX_WORKERS = os.cpu_count() or 4
+MAX_WORKERS = 2
 
 def get_pdf_size(pdf_stream):
     try:
@@ -215,7 +214,6 @@ def decode_all_page_barcodes(pdf_bytes, total_pages, scale=3.0):
                                 "piece_no": int(match.group(1)),
                                 "total": int(match.group(2))
                             })
-
                             break
 
                 except Exception as e:
