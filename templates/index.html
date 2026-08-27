@@ -233,7 +233,10 @@
 
     <script>
         // /medit 경로를 통해 API 요청
-        const API_BASE = '/medit';
+
+        const API_BASE = window.location.pathname.startsWith('/medit')
+            ? '/medit'
+            : '';
 
         const originalFetch = window.fetch;
         window.fetch = function(url, options) {

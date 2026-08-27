@@ -526,9 +526,17 @@ def download_excel():
     output.seek(0)
     return send_file(output, as_attachment=True, download_name="extraction_results.xlsx")
 
-
 @app.route('/print_filter', methods=['POST'])
 def print_filter():
+    try:
+        return _print_filter_impl()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"처리 중 오류: {e}"}), 500
+
+
+def _print_filter_impl():
     files = request.files.getlist('files')
     target_size = request.form.get('target_size')
 
