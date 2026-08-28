@@ -40,7 +40,7 @@ def ensure_images_extracted():
 
 ensure_images_extracted()
 
-MAX_WORKERS = 2
+MAX_WORKERS = 1
 
 def get_pdf_size(pdf_stream):
     try:
@@ -369,6 +369,11 @@ def parse():
         m_ref = manual_refs.get(f.filename)
         file_data.append((content, f.filename, m_ref))
 
+
+    results = []
+    for d in file_data:
+        page_results = extract_single_pdf(d[0], d[1], d[2])
+
     results = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -552,13 +557,7 @@ def _print_filter_impl():
         data, name = data_pair
         return get_pdf_size(BytesIO(data)) == target_size, data
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        check_results = list(
-            executor.map(
-                check_size_worker,
-                file_data
-            )
-        )
+    check_results = [check_size_worker(d) for d in file_data]
 
     grouped = []
 
