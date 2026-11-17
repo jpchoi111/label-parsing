@@ -15,6 +15,9 @@ import threading
 from reportlab.pdfgen import canvas as rl_canvas
 from docx import Document
 from copy import deepcopy
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
 
@@ -458,6 +461,19 @@ def download_outbound_check_list():
         # 기존 Word 템플릿 열기
         doc = Document(template_path)
 
+        # 검사일 자동 입력 (독일 현지 날짜)
+        today = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y")
+
+        date_cell = doc.tables[0].rows[0].cells[3]
+        date_paragraph = date_cell.paragraphs[0]
+
+        if date_paragraph.runs:
+            date_paragraph.runs[0].text = today
+            for run in date_paragraph.runs[1:]:
+                run.text = ''
+        else:
+            date_paragraph.add_run(today)
+
         if len(doc.tables) < 2:
             return jsonify({
                 "error": "템플릿에서 오더 입력 테이블을 찾을 수 없습니다."
@@ -475,6 +491,7 @@ def download_outbound_check_list():
         for index, order_no in enumerate(orders):
             cell = table.rows[index + 1].cells[0]
             paragraph = cell.paragraphs[0]
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
             if paragraph.runs:
                 paragraph.runs[0].text = order_no
