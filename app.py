@@ -13,6 +13,8 @@ from PIL import Image
 import zipfile
 import threading
 from reportlab.pdfgen import canvas as rl_canvas
+from docx import Document
+from copy import deepcopy
 
 app = Flask(__name__)
 
@@ -410,6 +412,96 @@ def parse():
         del progress_data[job_id]
 
     return jsonify(results)
+
+@app.route('/download_outbound_check_list', methods=['POST'])
+def download_outbound_check_list():
+
+    try:
+        results = request.get_json(silent=True)
+
+        if not isinstance(results, list):
+            return jsonify({"error": "잘못된 데이터 형식입니다."}), 400
+
+        # 템플릿 파일 경로
+        template_path = os.path.join(
+            app.root_path,
+            'Outbound_check_list.docx'
+        )
+
+        if not os.path.exists(template_path):
+            return jsonify({
+                "error": "Outbound_check_list.docx 템플릿을 찾을 수 없습니다."
+            }), 404
+
+        # 활성 오더의 Ref No만 추출
+        orders = []
+        seen = set()
+
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+
+            ref_no = str(item.get('Ref No', '')).strip()
+
+            if not ref_no or ref_no.lower() == 'not found':
+                continue
+
+            if ref_no not in seen:
+                orders.append(ref_no)
+                seen.add(ref_no)
+
+        if not orders:
+            return jsonify({
+                "error": "체크리스트에 입력할 유효한 오더가 없습니다."
+            }), 400
+
+        # 기존 Word 템플릿 열기
+        doc = Document(template_path)
+
+        if len(doc.tables) < 2:
+            return jsonify({
+                "error": "템플릿에서 오더 입력 테이블을 찾을 수 없습니다."
+            }), 500
+
+        # 두 번째 테이블이 오더 체크리스트
+        table = doc.tables[1]
+
+        # 오더 수가 기존 행보다 많으면 마지막 행의 서식을 복제
+        while len(table.rows) < len(orders) + 1:
+            new_row = deepcopy(table.rows[-1]._tr)
+            table._tbl.append(new_row)
+
+        # 첫 번째 열(Order No.)에 오더 번호 입력
+        for index, order_no in enumerate(orders):
+            cell = table.rows[index + 1].cells[0]
+            paragraph = cell.paragraphs[0]
+
+            if paragraph.runs:
+                paragraph.runs[0].text = order_no
+
+                for run in paragraph.runs[1:]:
+                    run.text = ''
+            else:
+                paragraph.add_run(order_no)
+
+        # Word 파일을 메모리에서 생성
+        output = BytesIO()
+        doc.save(output)
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name='Outbound_check_list.docx',
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+
+    except Exception as e:
+        print(f"[OUTBOUND CHECK LIST ERROR] {e}")
+
+        return jsonify({
+            "error": "체크리스트 생성 중 오류가 발생했습니다."
+        }), 500
 
 from datetime import datetime
 

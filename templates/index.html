@@ -176,8 +176,9 @@
         <div class="right-panel">
             <div class="card results-card" id="results-section" style="display: none;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h3 style="border:none; margin:0; padding:0;">🔍 분석 결과</h3>
+                    <h3 style="border:none; margin:0; padding:0;"> 분석 결과</h3>
                     <button class="btn btn-success" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;" onclick="downloadExcel()">Excel 저장</button>
+                    <button class="btn btn-primary" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;" onclick="downloadOutboundCheckList()">출고 체크리스트</button>
                 </div>
                 
                 <!-- 활성 결과 테이블 -->
@@ -425,8 +426,6 @@
             renderResultsTable();
         }
 
-
-
         async function downloadExcel() {
             if (currentAnalysisResults.length === 0) return;
             const response = await fetch('/download_excel', {
@@ -440,6 +439,47 @@
                 const a = document.createElement('a');
                 a.href = url; a.download = "extraction_results.xlsx";
                 document.body.appendChild(a); a.click(); a.remove();
+            }
+        }
+
+        async function downloadOutboundCheckList() {
+            if (currentAnalysisResults.length === 0) {
+                alert('체크리스트에 입력할 오더가 없습니다.');
+                return;
+            }
+
+            try {
+                const response = await fetch('/download_outbound_check_list', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(currentAnalysisResults)
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    alert('체크리스트 생성 오류: ' +
+                        (errorData.error || '처리 중 문제가 발생했습니다.'));
+                    return;
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'Outbound_check_list.docx';
+
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+
+                window.URL.revokeObjectURL(url);
+
+            } catch (error) {
+                console.error(error);
+                alert('체크리스트 다운로드 중 오류가 발생했습니다.');
             }
         }
 
